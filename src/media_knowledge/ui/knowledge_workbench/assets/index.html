@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f4f2ec" />
+    <title>知识工作台</title>
+    <meta name="description" content="搜索、提问并追溯你的私人多媒体知识库。" />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="知识工作台首页">
+          <span class="brand-mark">K</span>
+          <span><strong>知识</strong><small>工作台</small></span>
+        </a>
+        <nav class="mode-switch" aria-label="工作模式">
+          <button class="mode-button" data-mode="search">搜索</button>
+          <button class="mode-button active" data-mode="ask">问 AI</button>
+        </nav>
+        <div class="topbar-meta">
+          <button class="sync-button" id="sync-knowledge" type="button" title="把 Obsidian Markdown 增量同步到知识索引">同步知识库</button>
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="index-status">正在连接本地索引</span>
+          <kbd>⌘ K</kbd>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="knowledge-panel" aria-label="知识范围">
+          <div class="panel-heading">
+            <div><span class="eyebrow">范围</span><h2>知识库</h2></div>
+            <button class="text-button" id="clear-scope">清除</button>
+          </div>
+          <button class="all-knowledge selected" id="all-knowledge">
+            <span class="scope-icon">全</span><span>全部知识</span><strong id="document-count">0</strong>
+          </button>
+          <div id="filter-sections" class="filter-sections" aria-live="polite">
+            <section class="filter-section">
+              <div class="section-label">收藏集</div>
+              <div class="skeleton-line"></div><div class="skeleton-line short"></div>
+            </section>
+            <section class="filter-section">
+              <div class="section-label">媒体类型</div>
+              <div class="skeleton-line"></div>
+            </section>
+          </div>
+          <section class="recent-section">
+            <div class="section-label">最近文档</div>
+            <div id="recent-documents" class="recent-list">
+              <div class="recent-item muted">最近录入的资料会显示在这里。</div>
+            </div>
+          </section>
+          <section class="recent-section conversation-history-section">
+            <div class="section-label">对话历史</div>
+            <div id="conversation-history" class="recent-list">
+              <div class="recent-item muted">还没有保存的对话。</div>
+            </div>
+          </section>
+        </aside>
+
+        <section class="chat-panel" aria-label="知识对话">
+          <div class="conversation-header">
+            <div>
+              <span class="eyebrow">私人检索</span>
+              <h1 id="workspace-title">向知识档案提问</h1>
+            </div>
+            <button class="quiet-button" id="new-conversation">新建对话</button>
+          </div>
+          <div class="conversation" id="conversation" aria-live="polite">
+            <div class="welcome-card">
+              <span class="welcome-index">01</span>
+              <h2>问问你的知识档案记住了什么。</h2>
+              <p>回答始终以选定证据为依据，每一页、每张幻灯片和每个时间点都可以追溯。</p>
+              <div class="prompt-grid">
+                <button class="prompt-chip">综合所有资料，FAST-LIVO2 是否需要硬件同步？</button>
+                <button class="prompt-chip">比较我保存的两种工程方案</button>
+                <button class="prompt-chip">上周整理的课程里有哪些关键结论？</button>
+              </div>
+            </div>
+          </div>
+          <form class="composer" id="composer">
+            <div class="skill-context" id="skill-context" hidden>
+              <span class="skill-mark" aria-hidden="true">$</span>
+              <div class="skill-context-copy">
+                <strong>knowledge-ingestor</strong>
+                <small>多模态资料入库 · 运行后可写入 KnowledgeArchive 与 Obsidian</small>
+                <div class="skill-files" id="skill-files">未选择本地文件，可直接在任务中粘贴文字或 URL。</div>
+              </div>
+              <button type="button" class="skill-file-button" id="pick-skill-files">选择文件</button>
+              <button type="button" class="skill-remove-button" id="remove-skill" aria-label="取消引用 Skill">×</button>
+            </div>
+            <div class="scope-summary" id="scope-summary">正在检索全部知识</div>
+            <textarea id="prompt-input" rows="2" placeholder="向知识库提问……" aria-label="向知识库提问"></textarea>
+            <div class="composer-actions">
+              <div class="answer-controls">
+                <label class="control-pill skill-control">Skill
+                  <select id="skill-select" aria-label="引用 Skill">
+                    <option value="">不使用</option>
+                    <option value="knowledge-ingestor">知识摄取</option>
+                  </select>
+                </label>
+                <button type="button" class="control-pill selected" id="knowledge-mode">知识库</button>
+                <button type="button" class="control-pill" id="web-mode" disabled title="尚未配置联网搜索服务">联网</button>
+                <label class="control-pill check-control"><input type="checkbox" id="deep-analysis" /> 深度分析</label>
+                <span class="control-pill language-pill" title="无论资料原文使用什么语言，回答默认使用简体中文">中文回答</span>
+                <label class="model-control">模型：
+                  <select id="model-select" aria-label="回答模型"><option value="auto">自动</option></select>
+                </label>
+                <span class="model-hint" id="model-hint">正在加载可用模型</span>
+              </div>
+              <button class="send-button" type="submit"><span>发送</span><span aria-hidden="true">↗</span></button>
+            </div>
+          </form>
+        </section>
+
+        <aside class="sources-panel" aria-label="来源与证据">
+          <div class="panel-heading source-heading">
+            <div><span class="eyebrow">追溯</span><h2>来源</h2></div>
+            <div class="source-heading-actions">
+              <span class="evidence-count" id="evidence-count">0 条证据</span>
+              <button class="source-close" id="source-close" aria-label="关闭来源面板">×</button>
+            </div>
+          </div>
+          <div class="source-empty" id="sources-content">
+            <span class="source-empty-number">S</span>
+            <h3>证据会显示在这里</h3>
+            <p>选择搜索结果或引用，即可查看原文及其准确位置。</p>
+          </div>
+        </aside>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

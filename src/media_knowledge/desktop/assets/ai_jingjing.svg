@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4B9BC8"/>
+      <stop offset="0.52" stop-color="#24628E"/>
+      <stop offset="1" stop-color="#102F4A"/>
+    </linearGradient>
+    <linearGradient id="seal" x1="322" y1="280" x2="704" y2="748" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FBFEFF"/>
+      <stop offset="0.52" stop-color="#EAF7FC"/>
+      <stop offset="1" stop-color="#C8E7F4"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="28" stdDeviation="30" flood-color="#061725" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#background)"/>
+  <circle cx="512" cy="502" r="348" fill="none" stroke="#BDEBFA" stroke-width="14" opacity="0.24"/>
+  <circle cx="512" cy="502" r="302" fill="none" stroke="#D9F5FF" stroke-width="10" opacity="0.40"/>
+  <path d="M170 502c60-54 116-81 168-81M854 502c-60-54-116-81-168-81" fill="none" stroke="#BDEEFF" stroke-width="22" stroke-linecap="round" opacity="0.92"/>
+  <path d="M196 596c47-37 93-57 138-61M828 596c-47-37-93-57-138-61" fill="none" stroke="#91D3EC" stroke-width="15" stroke-linecap="round" opacity="0.64"/>
+
+  <rect x="292" y="270" width="440" height="488" rx="156" fill="url(#seal)" filter="url(#shadow)"/>
+  <rect x="314" y="292" width="396" height="444" rx="136" fill="none" stroke="#FFFFFF" stroke-width="9" opacity="0.86"/>
+  <text x="512" y="615" text-anchor="middle"
+        font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, sans-serif"
+        font-size="330" font-weight="700" fill="#164A70">静</text>
+
+  <path d="M750 238v78M711 277h78" stroke="#ECFAFF" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="750" cy="277" r="58" fill="none" stroke="#C5EDFA" stroke-width="9" opacity="0.68"/>
+  <circle cx="246" cy="744" r="15" fill="#BDEEFF" opacity="0.92"/>
+  <circle cx="797" cy="718" r="11" fill="#E6F9FF" opacity="0.90"/>
+</svg>

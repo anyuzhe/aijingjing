@@ -1,0 +1,33 @@
+# Personal knowledge, credentials, databases, archives, and model caches
+.knowledge/
+*.db
+*.db-wal
+*.db-shm
+*.aijjbackup
+providers.json
+
+# Python
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build and release artifacts
+build/
+dist/
+*.dmg
+*.app/
+
+# Generated/local files
+tmp/
+.DS_Store
+Thumbs.db
+*.log
+
+# IDE
+.idea/
+.vscode/
