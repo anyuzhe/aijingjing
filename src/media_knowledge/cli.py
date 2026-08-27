@@ -108,17 +108,18 @@ def run(argv: Sequence[str] | None = None) -> int:
     config = AppConfig.from_env(args.db)
     if args.command == "workbench":
         if "KNOWLEDGE_QA_PROVIDER" not in os.environ:
-            deepseek_flash = next(
+            deepseek_default = next(
                 (
                     provider
                     for provider in config.qa_compatible_providers
-                    if provider.id == "deepseek" and "deepseek-v4-flash" in provider.models
+                    if provider.id == "deepseek"
+                    and "deepseek-v4-flash-vision-exp" in provider.models
                 ),
                 None,
             )
-            if deepseek_flash:
-                config.qa_provider = deepseek_flash.id
-                config.qa_model = "deepseek-v4-flash"
+            if deepseek_default:
+                config.qa_provider = deepseek_default.id
+                config.qa_model = "deepseek-v4-flash-vision-exp"
         if args.obsidian_vault:
             config.obsidian_vault_root = Path(args.obsidian_vault).expanduser().resolve()
         from .ui.knowledge_workbench import serve

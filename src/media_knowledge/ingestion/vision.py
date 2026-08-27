@@ -9,18 +9,40 @@ from ..providers import OpenAICompatibleAnswerProvider
 
 
 class MultimodalInterpreter:
-    """Use an explicitly configured Kimi multimodal model for visual understanding."""
+    """Use the selected DeepSeek or Kimi multimodal model for visual understanding."""
+
+    supported_models = {
+        "deepseek-v4-flash-vision-exp",
+        "kimi-k3",
+        "kimi-k2.6",
+        "kimi-k2.7-code",
+        "kimi-k2.7-code-highspeed",
+    }
 
     def __init__(self, config: AppConfig, *, enabled: bool = True, max_images: int = 12) -> None:
         self.enabled = enabled
         self.remaining = max(0, max_images)
-        provider = next((item for item in config.qa_compatible_providers if item.id == "kimi"), None)
-        model = None
-        if provider:
-            model = next(
-                (name for name in provider.models if name in {"kimi-k3", "kimi-k2.6", "kimi-k2.5"}),
+        provider = next(
+            (
+                item for item in config.qa_compatible_providers
+                if item.id == config.qa_provider and config.qa_model in self.supported_models
+                and config.qa_model in item.models
+            ),
+            None,
+        )
+        model = config.qa_model if provider else None
+        if provider is None:
+            provider = next(
+                (
+                    item for item in config.qa_compatible_providers
+                    if any(name in self.supported_models for name in item.models)
+                ),
                 None,
             )
+            model = next(
+                (name for name in provider.models if name in self.supported_models),
+                None,
+            ) if provider else None
         self.provider = (
             OpenAICompatibleAnswerProvider(
                 provider.base_url,

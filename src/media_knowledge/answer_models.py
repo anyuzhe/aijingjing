@@ -16,6 +16,7 @@ class AnswerModelSpec:
     reasoning_effort: str | None = None
     deep_reasoning_effort: str | None = None
     default: bool = False
+    supports_images: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -102,17 +103,34 @@ def _compatible_models(config: AppConfig) -> list[AnswerModelSpec]:
             for model in names
             if model and model != "grounded-extractive-v1"
         )
+    image_models = {
+        "deepseek-v4-flash-vision-exp",
+        "kimi-k3",
+        "kimi-k2.6",
+        "kimi-k2.7-code",
+        "kimi-k2.7-code-highspeed",
+    }
     for provider in config.qa_compatible_providers:
-        choices.extend(
-            AnswerModelSpec(
+        for model in provider.models:
+            supports_images = model in image_models
+            label = (
+                f"{model} · {provider.label} · 视觉"
+                if supports_images
+                else f"{model} · {provider.label}"
+            )
+            description = (
+                f"使用本机配置的 {provider.label} API，支持文字与图片联合理解。"
+                if supports_images
+                else f"使用本机配置的 {provider.label} API。"
+            )
+            choices.append(AnswerModelSpec(
                 f"compatible::{provider.id}::{model}",
-                f"{model} · {provider.label}",
+                label,
                 f"openai-compatible:{provider.id}",
                 model,
-                f"使用本机配置的 {provider.label} API。",
-            )
-            for model in provider.models
-        )
+                description,
+                supports_images=supports_images,
+            ))
     return choices
 
 

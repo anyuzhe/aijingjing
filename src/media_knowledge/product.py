@@ -13,6 +13,8 @@ from pathlib import Path
 PRODUCT_NAME = "AI知识库-AI静静"
 PRODUCT_SLUG = "AI-Jingjing"
 LEGACY_PRODUCT_SLUG = "AI-Xiaopang"
+DEFAULT_ANSWER_MODEL = "compatible::deepseek::deepseek-v4-flash-vision-exp"
+LEGACY_DEFAULT_ANSWER_MODELS = {"compatible::deepseek::deepseek-v4-flash"}
 
 
 def _platform_product_root(slug: str) -> Path:
@@ -182,7 +184,7 @@ class ProductPaths:
 
 @dataclass(slots=True)
 class DesktopSettings:
-    default_model: str = "compatible::deepseek::deepseek-v4-flash"
+    default_model: str = DEFAULT_ANSWER_MODEL
     answer_language: str = "zh-CN"
     archive_originals: bool = True
     create_source_notes: bool = True

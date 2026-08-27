@@ -53,7 +53,7 @@ except ImportError as exc:  # pragma: no cover - exercised by the launcher witho
     raise RuntimeError("桌面界面组件未安装，请安装项目的 desktop 依赖") from exc
 
 from ..ingestion import CancellationToken, ProgressEvent
-from ..product import DesktopSettings, PRODUCT_NAME
+from ..product import DEFAULT_ANSWER_MODEL, DesktopSettings, PRODUCT_NAME
 from .. import __version__
 from .controller import DesktopController
 from .diagnostics import run_diagnostics
@@ -382,7 +382,7 @@ class SettingsDialog(QDialog):
         self.synthesis = QCheckBox("入库时直连 DeepSeek 生成 AI 知识提炼（优先 Flash）")
         self.synthesis.setChecked(controller.settings.auto_synthesize_notes)
         form.addRow("", self.synthesis)
-        self.vision = QCheckBox("使用 Kimi 进行高级视觉理解（可选；DeepSeek 暂不接收图片）")
+        self.vision = QCheckBox("使用 DeepSeek Vision 或 Kimi 进行高级视觉理解")
         self.vision.setChecked(controller.settings.enable_cloud_vision)
         form.addRow("", self.vision)
         self.watched_enabled = QCheckBox("启用监听文件夹的后台增量同步")
@@ -448,11 +448,14 @@ class SettingsDialog(QDialog):
             self.obsidian_path.setText(value)
 
     def persist(self) -> None:
-        if self.deepseek_key.text().strip():
+        configured_deepseek_now = bool(self.deepseek_key.text().strip())
+        if configured_deepseek_now:
             self.controller.providers.update("deepseek", api_key=self.deepseek_key.text())
         if self.kimi_key.text().strip():
             self.controller.providers.update("kimi", api_key=self.kimi_key.text())
         model = str(self.model.currentData() or self.controller.settings.default_model)
+        if configured_deepseek_now and model == "local-extractive":
+            model = DEFAULT_ANSWER_MODEL
         settings = replace(
             self.controller.settings,
             default_model=model,

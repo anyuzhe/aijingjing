@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-59%20passed-2F855A" alt="59 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.0.3-4C8FBF" alt="Version 2.0.3">
+    <img src="https://img.shields.io/badge/Test-65%20passed-2F855A" alt="65 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.0.4-4C8FBF" alt="Version 2.0.4">
   </p>
 </div>
 
@@ -75,7 +75,7 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 - 点击回答中的引用可打开原文阅读器并定位页码或时间点；
 - 没有足够证据时明确说明，而不是编造答案。
 
-回答模型可以选择 DeepSeek、Kimi 或完全离线的本地证据模型。默认检索模型不是大模型，因此日常搜索成本很低。
+回答模型可以选择 DeepSeek、Kimi 或完全离线的本地证据模型。配置 DeepSeek 后默认使用支持文字与图片理解的实验模型 `deepseek-v4-flash-vision-exp`；检索本身不调用大模型，因此日常搜索成本很低。
 
 ### 5. 原文阅读与资料管理
 
@@ -224,7 +224,7 @@ AI-Jingjing/
 | 本地证据回答 | 否 | 无 |
 | DeepSeek/Kimi 回答 | 是 | 问题、有限对话上下文、召回的证据块 |
 | DeepSeek 知识提炼 | 是 | 当前导入资料的有界提取文本 |
-| Kimi 视觉理解 | 是 | 用户启用后选中的有限图片 |
+| DeepSeek Vision/Kimi 视觉理解 | 是 | 用户启用后由导入策略选中的有限图片 |
 
 模型服务不会收到整个知识数据库、归档目录或 Obsidian Vault。
 
@@ -235,7 +235,7 @@ pip install pytest
 pytest -q
 ```
 
-当前版本包含 59 项自动化测试，覆盖分块、索引迁移、相关性排序与误召回过滤、连续对话、引用、微信文章抓取与验证页拦截、质检、同步、备份恢复和桌面产品行为。
+当前版本包含 65 项自动化测试，覆盖分块、索引迁移、模型迁移、DeepSeek Vision 默认选择、相关性排序与误召回过滤、连续对话、引用、微信文章抓取与验证页拦截、质检、同步、备份恢复和桌面产品行为。
 
 ## 构建桌面应用
 

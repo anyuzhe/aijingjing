@@ -5,13 +5,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from media_knowledge.desktop.app import create_application
-    from media_knowledge.desktop.controller import DesktopController
+    from media_knowledge.desktop.app import SettingsDialog, create_application
+    from media_knowledge.desktop.controller import DesktopController, ProviderConfigStore
     from media_knowledge.product import DesktopSettings
 except (ImportError, RuntimeError):  # pragma: no cover - desktop extra is optional
     create_application = None
@@ -19,6 +20,29 @@ except (ImportError, RuntimeError):  # pragma: no cover - desktop extra is optio
 
 @unittest.skipIf(create_application is None, "PySide6 desktop components are unavailable")
 class DesktopConversationTests(unittest.TestCase):
+    def test_first_deepseek_key_keeps_vision_as_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = DesktopController(Path(temporary) / "data", migrate_legacy=False)
+            application, window = create_application(controller.paths.root)
+            dialog = SettingsDialog(controller, window)
+            try:
+                self.assertEqual(dialog.model.currentData(), "local-extractive")
+                dialog.deepseek_key.setText("temporary-test-key")
+                with patch.object(ProviderConfigStore, "_set_secret", return_value=False):
+                    dialog.persist()
+                self.assertEqual(
+                    controller.settings.default_model,
+                    "compatible::deepseek::deepseek-v4-flash-vision-exp",
+                )
+                self.assertIn(
+                    "compatible::deepseek::deepseek-v4-flash-vision-exp",
+                    {str(item["id"]) for item in controller.model_choices()},
+                )
+            finally:
+                dialog.close()
+                window.close()
+                application.processEvents()
+
     def test_two_turns_restore_send_button_and_reuse_conversation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

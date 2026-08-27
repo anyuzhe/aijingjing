@@ -18,7 +18,13 @@ from ..answer_models import available_answer_models
 from ..config import AppConfig, KEYRING_SERVICE
 from ..ingestion import CancellationToken, IngestionService, IngestionSummary, ProgressEvent
 from ..models import SearchResult, utcnow_iso
-from ..product import DesktopSettings, ProductPaths, PRODUCT_NAME
+from ..product import (
+    DEFAULT_ANSWER_MODEL,
+    LEGACY_DEFAULT_ANSWER_MODELS,
+    DesktopSettings,
+    ProductPaths,
+    PRODUCT_NAME,
+)
 from ..qa.engine import KnowledgeQAEngine
 from ..qa.models import KnowledgeAnswer
 from ..retrieval import KnowledgeRetriever
@@ -34,7 +40,7 @@ DEFAULT_PROVIDERS = {
         "id": "deepseek",
         "label": "DeepSeek",
         "base_url": "https://api.deepseek.com",
-        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        "models": ["deepseek-v4-flash-vision-exp", "deepseek-v4-flash", "deepseek-v4-pro"],
         "temperature": 0.1,
     },
     "kimi": {
@@ -78,6 +84,7 @@ class ProviderConfigStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
         self._migrate_plaintext_secrets()
+        self._merge_provider_defaults()
 
     def _reference(self, provider_id: str) -> str:
         namespace = hashlib.sha256(str(self.path).encode("utf-8")).hexdigest()[:12]
@@ -126,6 +133,33 @@ class ProviderConfigStore:
         except (OSError, UnicodeError, json.JSONDecodeError):
             return {"providers": []}
         return value if isinstance(value, dict) and isinstance(value.get("providers"), list) else {"providers": []}
+
+    def _merge_provider_defaults(self) -> None:
+        """Add newly supported built-in models without discarding custom model entries."""
+
+        payload = self._load()
+        providers = payload.get("providers", [])
+        if not isinstance(providers, list):
+            return
+        changed = False
+        for value in providers:
+            if not isinstance(value, dict):
+                continue
+            defaults = DEFAULT_PROVIDERS.get(str(value.get("id") or ""))
+            if defaults is None:
+                continue
+            raw_models = value.get("models", [])
+            current = (
+                [str(model).strip() for model in raw_models if str(model).strip()]
+                if isinstance(raw_models, list)
+                else []
+            )
+            merged = list(dict.fromkeys([*defaults["models"], *current]))
+            if merged != current:
+                value["models"] = merged
+                changed = True
+        if changed:
+            _atomic_json(self.path, payload, private=True)
 
     def status(self) -> list[dict[str, object]]:
         current = {
@@ -197,6 +231,9 @@ class DesktopController:
             self.migrated_database = self.paths.migrate_legacy_database()
         self.settings = DesktopSettings.load(self.paths.settings)
         self.providers = ProviderConfigStore(self.paths.providers)
+        if self.settings.default_model in LEGACY_DEFAULT_ANSWER_MODELS:
+            self.settings.default_model = DEFAULT_ANSWER_MODEL
+            self.settings.save(self.paths.settings)
 
     def reload(self) -> None:
         self.settings = DesktopSettings.load(self.paths.settings)

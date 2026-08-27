@@ -22,12 +22,73 @@ from media_knowledge.ingestion.extractors import (
     WebExtractor,
     url_extractor_for,
 )
+from media_knowledge.ingestion.vision import MultimodalInterpreter
 from media_knowledge.product import DesktopSettings, ProductPaths, PRODUCT_NAME, PRODUCT_SLUG
 from media_knowledge.models import ContentSegment
 from media_knowledge.sync import scan_folder
 
 
 class DesktopProductTests(unittest.TestCase):
+    def test_deepseek_vision_is_the_desktop_default(self) -> None:
+        self.assertEqual(
+            DesktopSettings().default_model,
+            "compatible::deepseek::deepseek-v4-flash-vision-exp",
+        )
+
+    def test_provider_store_adds_deepseek_vision_to_existing_model_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "providers.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "providers": [
+                            {
+                                "id": "deepseek",
+                                "label": "DeepSeek",
+                                "base_url": "https://api.deepseek.com",
+                                "models": ["deepseek-v4-flash", "custom-deepseek-model"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            status = ProviderConfigStore(path).status()
+            models = next(item["models"] for item in status if item["id"] == "deepseek")
+            self.assertEqual(models[0], "deepseek-v4-flash-vision-exp")
+            self.assertIn("custom-deepseek-model", models)
+
+    def test_controller_migrates_previous_deepseek_flash_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = ProductPaths.resolve(temporary).ensure()
+            DesktopSettings(
+                default_model="compatible::deepseek::deepseek-v4-flash"
+            ).save(paths.settings)
+            controller = DesktopController(temporary, migrate_legacy=False)
+            self.assertEqual(
+                controller.settings.default_model,
+                "compatible::deepseek::deepseek-v4-flash-vision-exp",
+            )
+
+    def test_multimodal_interpreter_prefers_selected_deepseek_vision(self) -> None:
+        config = AppConfig(
+            database_path=Path(tempfile.gettempdir()) / "vision-model-test.db",
+            qa_provider="deepseek",
+            qa_model="deepseek-v4-flash-vision-exp",
+            qa_compatible_providers=(
+                CompatibleQAProviderConfig(
+                    "deepseek",
+                    "DeepSeek",
+                    "https://api.deepseek.com",
+                    "deepseek-secret",
+                    ("deepseek-v4-flash-vision-exp", "deepseek-v4-flash"),
+                ),
+            ),
+        )
+        interpreter = MultimodalInterpreter(config)
+        self.assertTrue(interpreter.available)
+        self.assertEqual(interpreter.provider.model, "deepseek-v4-flash-vision-exp")
+
     def test_video_link_router_recognizes_weixin_and_direct_media(self) -> None:
         self.assertIsInstance(
             url_extractor_for("https://weixin.qq.com/sph/AciGNsUoaW"),

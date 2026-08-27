@@ -107,6 +107,27 @@ class AnswerModelTests(unittest.TestCase):
         default = next(model for model in available_answer_models(config) if model.default)
         self.assertEqual(default.id, "compatible::deepseek::deepseek-v4-flash")
 
+    @mock.patch("media_knowledge.answer_models.shutil.which", return_value=None)
+    def test_deepseek_vision_is_selectable_image_capable_and_default(self, _which) -> None:
+        config = self.config(
+            qa_provider="deepseek",
+            qa_model="deepseek-v4-flash-vision-exp",
+            qa_compatible_providers=(
+                CompatibleQAProviderConfig(
+                    "deepseek",
+                    "DeepSeek",
+                    "https://api.deepseek.com",
+                    "deepseek-secret",
+                    ("deepseek-v4-flash-vision-exp", "deepseek-v4-flash"),
+                ),
+            ),
+        )
+        models = available_answer_models(config)
+        vision = next(item for item in models if item.model == "deepseek-v4-flash-vision-exp")
+        self.assertTrue(vision.supports_images)
+        self.assertTrue(vision.default)
+        self.assertIn("视觉", vision.label)
+
 
 if __name__ == "__main__":
     unittest.main()

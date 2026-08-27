@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-59%20passed-2F855A" alt="59 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.0.3-4C8FBF" alt="Version 2.0.3">
+    <img src="https://img.shields.io/badge/Test-65%20passed-2F855A" alt="65 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.0.4-4C8FBF" alt="Version 2.0.4">
   </p>
 </div>
 
@@ -75,7 +75,7 @@ Search does not call an LLM. The first semantic search downloads an approximatel
 - Click an inline citation to open the source reader at the matching page or timestamp.
 - Return an explicit insufficient-evidence response instead of inventing facts.
 
-Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence model. Retrieval itself remains local and model-independent.
+Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence model. Once DeepSeek is configured, the image-capable experimental `deepseek-v4-flash-vision-exp` model is selected by default. Retrieval itself remains local and model-independent.
 
 ### 5. Source reading and knowledge management
 
@@ -224,7 +224,7 @@ Use `AI_JINGJING_DATA_DIR` or the `--data-dir` option to select another director
 | Local extractive answer | No | None |
 | DeepSeek/Kimi answer | Yes | question, bounded conversation context, retrieved evidence chunks |
 | DeepSeek knowledge synthesis | Yes | bounded extracted text from the current import |
-| Kimi visual analysis | Yes | a limited set of images selected by the ingestion policy |
+| DeepSeek Vision/Kimi visual analysis | Yes | a limited set of images selected by the ingestion policy |
 
 Model providers never receive the entire database, archive directory, or Obsidian vault.
 
@@ -235,7 +235,7 @@ pip install pytest
 pytest -q
 ```
 
-Version 2.0.3 includes 59 automated tests covering chunking, migration, relevance sorting and false-hit filtering, two-turn desktop conversations, citations, Weixin article extraction and challenge-page blocking, quality gates, synchronization, backup/restore, and product behavior.
+Version 2.0.4 includes 65 automated tests covering chunking, migration, model-catalog migration, the DeepSeek Vision default, relevance sorting and false-hit filtering, two-turn desktop conversations, citations, Weixin article extraction and challenge-page blocking, quality gates, synchronization, backup/restore, and product behavior.
 
 ## Build desktop packages
 
