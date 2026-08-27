@@ -44,8 +44,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleDisplayName": "AI知识库-AI静静",
         "CFBundleName": "AI静静",
-        "CFBundleShortVersionString": "2.0.1",
-        "CFBundleVersion": "2.0.1",
+        "CFBundleShortVersionString": "2.0.2",
+        "CFBundleVersion": "2.0.2",
         "NSHighResolutionCapable": True,
         "NSMicrophoneUsageDescription": "用于导入和转写用户选择的音频资料。",
     },

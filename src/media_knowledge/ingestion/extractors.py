@@ -492,6 +492,16 @@ class AudioVideoExtractor:
         )
 
 
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+}
+
+
 class _ReadableHTML(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -500,7 +510,10 @@ class _ReadableHTML(HTMLParser):
         self._ignored = 0
         self.parts: list[str] = []
 
-    def handle_starttag(self, tag: str, _attrs) -> None:
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attributes = dict(attrs)
+        if tag == "meta" and attributes.get("property") in {"og:title", "twitter:title"}:
+            self.title = str(attributes.get("content") or self.title)
         if tag in {"script", "style", "noscript", "svg"}:
             self._ignored += 1
         if tag == "title":
@@ -529,16 +542,84 @@ class _ReadableHTML(HTMLParser):
         return value.strip()
 
 
+class _WeixinArticleHTML(HTMLParser):
+    """Extract the real article body from a Weixin public-account page."""
+
+    _void_tags = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+    _block_tags = {"p", "div", "section", "article", "h1", "h2", "h3", "h4", "li", "blockquote", "br", "hr"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self.parts: list[str] = []
+        self._content_depth = 0
+        self._ignored = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attributes = dict(attrs)
+        if tag == "meta" and attributes.get("property") in {"og:title", "twitter:title"}:
+            self.title = str(attributes.get("content") or self.title)
+        entering_content = attributes.get("id") == "js_content"
+        if entering_content:
+            self._content_depth = 1
+        elif self._content_depth and tag not in self._void_tags:
+            self._content_depth += 1
+        if self._content_depth and tag in {"script", "style", "noscript", "svg"}:
+            self._ignored += 1
+        if self._content_depth and tag in self._block_tags:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._content_depth:
+            return
+        if tag in {"script", "style", "noscript", "svg"} and self._ignored:
+            self._ignored -= 1
+        if tag in self._block_tags:
+            self.parts.append("\n")
+        if tag not in self._void_tags:
+            self._content_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._content_depth and not self._ignored:
+            self.parts.append(data)
+
+    def text(self) -> str:
+        value = html.unescape(" ".join(self.parts))
+        value = re.sub(r"[ \t\r\f\v]+", " ", value)
+        value = re.sub(r"\n\s*\n+", "\n\n", value)
+        return value.strip()
+
+
+def _download_web_document(url: str, context: ExtractionContext) -> tuple[bytes, str, str]:
+    context.message("正在下载网页快照")
+    request = urllib.request.Request(url, headers=_BROWSER_HEADERS)
+    with urllib.request.urlopen(request, timeout=45) as response:
+        raw = response.read(15 * 1024 * 1024 + 1)
+        if len(raw) > 15 * 1024 * 1024:
+            raise ValueError("网页超过 15MB 安全限制")
+        charset = response.headers.get_content_charset() or "utf-8"
+        document = raw.decode(charset, errors="replace")
+        final_url = response.geturl() if hasattr(response, "geturl") else url
+    return raw, document, final_url
+
+
+def _raise_for_weixin_challenge(final_url: str, document: str) -> None:
+    path = urllib.parse.urlsplit(final_url).path.casefold()
+    challenge_markers = (
+        "当前环境异常，完成验证后即可继续访问",
+        "wappoc_appmsgcaptcha",
+        "访问过于频繁，请用微信扫描二维码进行访问",
+    )
+    if path.startswith("/mp/wappoc_appmsgcaptcha") or any(marker in document for marker in challenge_markers):
+        raise RuntimeError("微信返回了访问验证页，没有取得文章正文；请稍后重试或在浏览器中打开后导出为 PDF 再导入")
+
+
 class WebExtractor:
     def extract(self, url: str, context: ExtractionContext) -> ExtractionResult:
-        context.message("正在下载网页快照")
-        request = urllib.request.Request(url, headers={"User-Agent": "AI-Jingjing/1.0"})
-        with urllib.request.urlopen(request, timeout=45) as response:
-            raw = response.read(15 * 1024 * 1024 + 1)
-            if len(raw) > 15 * 1024 * 1024:
-                raise ValueError("网页超过 15MB 安全限制")
-            charset = response.headers.get_content_charset() or "utf-8"
-            document = raw.decode(charset, errors="replace")
+        raw, document, _final_url = _download_web_document(url, context)
         parser = _ReadableHTML()
         parser.feed(document)
         text = parser.text()
@@ -551,6 +632,37 @@ class WebExtractor:
             original_uri=url,
             checksum=hashlib.sha256(raw).hexdigest(),
             metadata={"snapshot_html": document},
+        )
+
+
+class WeixinArticleExtractor:
+    """Read public Weixin articles without treating anti-bot pages as knowledge."""
+
+    @classmethod
+    def supports(cls, url: str) -> bool:
+        parsed = urllib.parse.urlsplit(url)
+        host = (parsed.hostname or "").casefold()
+        return parsed.scheme.casefold() in {"http", "https"} and host == "mp.weixin.qq.com" and parsed.path.startswith("/s/")
+
+    def extract(self, url: str, context: ExtractionContext) -> ExtractionResult:
+        raw, document, final_url = _download_web_document(url, context)
+        _raise_for_weixin_challenge(final_url, document)
+        parser = _WeixinArticleHTML()
+        parser.feed(document)
+        text = parser.text()
+        if len(text) < 80:
+            raise RuntimeError("微信公众号页面没有提取到足够的文章正文；页面可能已删除、需要验证或限制外部访问")
+        return ExtractionResult(
+            title=parser.title.strip() or url,
+            media_type="web",
+            segments=[ContentSegment("web-1", 1, "text", text=text)],
+            original_uri=url,
+            checksum=hashlib.sha256(raw).hexdigest(),
+            metadata={
+                "snapshot_html": document,
+                "platform": "weixin_public_account",
+                "content_scope": "full_source",
+            },
         )
 
 
@@ -766,6 +878,8 @@ class WeixinChannelsExtractor:
 def url_extractor_for(url: str):
     if WeixinChannelsExtractor.supports(url):
         return WeixinChannelsExtractor()
+    if WeixinArticleExtractor.supports(url):
+        return WeixinArticleExtractor()
     if DirectMediaURLExtractor.supports(url):
         return DirectMediaURLExtractor()
     return WebExtractor()

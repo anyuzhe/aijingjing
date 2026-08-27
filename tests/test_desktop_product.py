@@ -17,6 +17,7 @@ from media_knowledge.ingestion.types import ExtractionResult
 from media_knowledge.ingestion.extractors import (
     DirectMediaURLExtractor,
     ExtractionContext,
+    WeixinArticleExtractor,
     WeixinChannelsExtractor,
     WebExtractor,
     url_extractor_for,
@@ -37,6 +38,87 @@ class DesktopProductTests(unittest.TestCase):
             DirectMediaURLExtractor,
         )
         self.assertIsInstance(url_extractor_for("https://example.test/article"), WebExtractor)
+
+    def test_weixin_public_account_article_uses_dedicated_extractor(self) -> None:
+        self.assertIsInstance(
+            url_extractor_for("https://mp.weixin.qq.com/s/rSnp1yNHHl1XxGQu_-KdWA?scene=1"),
+            WeixinArticleExtractor,
+        )
+
+    def test_weixin_article_extracts_real_body_with_browser_headers(self) -> None:
+        article = "赤平投影用于判断结构面组合与边坡稳定性。" * 12
+        payload = (
+            '<html><head><meta property="og:title" content="赤平投影图到底怎么看？"></head>'
+            f'<body><nav>页面导航不应进入正文</nav><div id="js_content"><p>{article}</p></div></body></html>'
+        ).encode("utf-8")
+
+        class FakeResponse(BytesIO):
+            def __init__(self) -> None:
+                super().__init__(payload)
+                self.headers = Message()
+                self.headers["Content-Type"] = "text/html; charset=utf-8"
+
+            def geturl(self) -> str:
+                return "https://mp.weixin.qq.com/s/example"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        captured_request = None
+
+        def open_request(request, timeout):
+            nonlocal captured_request
+            captured_request = request
+            self.assertEqual(timeout, 45)
+            return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            context = ExtractionContext(
+                paths=ProductPaths.resolve(temporary).ensure(),
+                settings=DesktopSettings(auto_synthesize_notes=False, enable_cloud_vision=False),
+                cancellation=CancellationToken(),
+            )
+            with patch("media_knowledge.ingestion.extractors.urllib.request.urlopen", side_effect=open_request):
+                extracted = WeixinArticleExtractor().extract("https://mp.weixin.qq.com/s/example", context)
+
+        self.assertEqual(extracted.title, "赤平投影图到底怎么看？")
+        self.assertIn("边坡稳定性", extracted.segments[0].text)
+        self.assertNotIn("页面导航", extracted.segments[0].text)
+        self.assertIsNotNone(captured_request)
+        headers = dict(captured_request.header_items())
+        self.assertTrue(headers["User-agent"].startswith("Mozilla/5.0"))
+        self.assertEqual(extracted.metadata["platform"], "weixin_public_account")
+
+    def test_weixin_verification_page_is_never_accepted_as_article(self) -> None:
+        payload = "<html><body>当前环境异常，完成验证后即可继续访问。</body></html>".encode("utf-8")
+
+        class FakeResponse(BytesIO):
+            def __init__(self) -> None:
+                super().__init__(payload)
+                self.headers = Message()
+                self.headers["Content-Type"] = "text/html; charset=utf-8"
+
+            def geturl(self) -> str:
+                return "https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?poc_token=test"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            context = ExtractionContext(
+                paths=ProductPaths.resolve(temporary).ensure(),
+                settings=DesktopSettings(auto_synthesize_notes=False, enable_cloud_vision=False),
+                cancellation=CancellationToken(),
+            )
+            with patch("media_knowledge.ingestion.extractors.urllib.request.urlopen", return_value=FakeResponse()):
+                with self.assertRaisesRegex(RuntimeError, "访问验证页"):
+                    WeixinArticleExtractor().extract("https://mp.weixin.qq.com/s/example", context)
 
     def test_weixin_public_share_metadata_is_rejected_without_media_stream(self) -> None:
         payload = {

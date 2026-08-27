@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-55%20passed-2F855A" alt="55 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.0.1-4C8FBF" alt="Version 2.0.1">
+    <img src="https://img.shields.io/badge/Test-58%20passed-2F855A" alt="58 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.0.2-4C8FBF" alt="Version 2.0.2">
   </p>
 </div>
 
@@ -35,7 +35,7 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 ### 1. 统一多模态入库
 
 - 一次选择或拖入多个文件。
-- 支持 Markdown、纯文本、Word、PDF、PPTX、图片、音频、视频和网页。
+- 支持 Markdown、纯文本、Word、PDF、PPTX、图片、音频、视频、普通网页和微信公众号文章。
 - PDF 与 PPT 按页面理解，重要页面保留图像证据。
 - 音视频生成时间轴转写；视频还可抽取关键帧。
 - 同名 PPT、PDF、录音和视频自动归为同一个 `Source Package`。
@@ -115,6 +115,7 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 | 音频 | `.mp3` `.m4a` `.wav` `.flac` 等 | Whisper 转写 | 开始/结束时间 |
 | 视频 | `.mp4` `.mov` `.mkv` `.webm` 等 | FFmpeg、Whisper、关键帧 | 时间轴与关键帧 |
 | 网页/媒体链接 | `https://...` | 正文抓取、网页快照或真实媒体流下载 | URL、快照、时间轴 |
+| 微信公众号文章 | `mp.weixin.qq.com/s/...` | 专用正文与标题提取，验证页拦截 | 文章 URL、正文快照 |
 
 ## 架构
 
@@ -233,7 +234,7 @@ pip install pytest
 pytest -q
 ```
 
-当前版本包含 55 项自动化测试，覆盖分块、索引迁移、检索、连续对话、引用、质检、同步、备份恢复和桌面产品行为。
+当前版本包含 58 项自动化测试，覆盖分块、索引迁移、检索、连续对话、引用、微信文章抓取与验证页拦截、质检、同步、备份恢复和桌面产品行为。
 
 ## 构建桌面应用
 

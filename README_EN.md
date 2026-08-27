@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-55%20passed-2F855A" alt="55 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.0.1-4C8FBF" alt="Version 2.0.1">
+    <img src="https://img.shields.io/badge/Test-58%20passed-2F855A" alt="58 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.0.2-4C8FBF" alt="Version 2.0.2">
   </p>
 </div>
 
@@ -115,6 +115,7 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 | Audio | `.mp3` `.m4a` `.wav` `.flac`, etc. | Whisper transcription | start/end timestamp |
 | Video | `.mp4` `.mov` `.mkv` `.webm`, etc. | FFmpeg, Whisper, keyframes | timeline and keyframe |
 | Web/media URL | `https://...` | article extraction, snapshot, or authentic media download | URL, snapshot, timestamp |
+| Weixin public article | `mp.weixin.qq.com/s/...` | dedicated title/body extraction and challenge-page blocking | article URL, body snapshot |
 
 ## Architecture
 
@@ -233,7 +234,7 @@ pip install pytest
 pytest -q
 ```
 
-Version 2.0.1 includes 55 automated tests covering chunking, migration, retrieval, two-turn desktop conversations, citations, quality gates, synchronization, backup/restore, and product behavior.
+Version 2.0.2 includes 58 automated tests covering chunking, migration, retrieval, two-turn desktop conversations, citations, Weixin article extraction and challenge-page blocking, quality gates, synchronization, backup/restore, and product behavior.
 
 ## Build desktop packages
 
