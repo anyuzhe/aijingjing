@@ -8,6 +8,7 @@ from unittest import mock
 from media_knowledge.answer_models import available_answer_models, resolve_answer_model
 from media_knowledge.config import AppConfig, CompatibleQAProviderConfig
 from media_knowledge.providers import CodexAnswerProvider, ExtractiveGroundedProvider, OpenAICompatibleAnswerProvider
+from media_knowledge.qa.models import AnswerRequest, ImageAttachment
 from media_knowledge.runtime import build_answer_provider
 
 
@@ -127,6 +128,36 @@ class AnswerModelTests(unittest.TestCase):
         self.assertTrue(vision.supports_images)
         self.assertTrue(vision.default)
         self.assertIn("视觉", vision.label)
+
+    def test_openai_compatible_provider_sends_real_multimodal_content_array(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "question.png"
+            image.write_bytes(b"normalized-image")
+            provider = OpenAICompatibleAnswerProvider(
+                "https://provider.example/v1", "test-key", "deepseek-v4-flash-vision-exp"
+            )
+            response = {
+                "choices": [{"message": {"content": "图片中是一个流程图。"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
+            }
+            with mock.patch.object(provider, "request_json", return_value=response) as request:
+                result = provider.generate(
+                    AnswerRequest(
+                        "图里是什么？",
+                        "system",
+                        "user prompt",
+                        [],
+                        "zh-CN",
+                        [ImageAttachment(str(image), image.name)],
+                    )
+                )
+            payload = request.call_args.args[0]
+            content = payload["messages"][1]["content"]
+            self.assertIsInstance(content, list)
+            self.assertEqual(content[0], {"type": "text", "text": "user prompt"})
+            self.assertEqual(content[1]["type"], "image_url")
+            self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+            self.assertEqual(result.markdown, "图片中是一个流程图。")
 
 
 if __name__ == "__main__":

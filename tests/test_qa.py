@@ -11,7 +11,7 @@ from media_knowledge.indexing import IndexingService
 from media_knowledge.models import SourceReference
 from media_knowledge.providers import AnswerProvider, CodexAnswerProvider, WebSearchHit, WebSearchProvider
 from media_knowledge.qa.engine import KnowledgeQAEngine
-from media_knowledge.qa.models import AnswerRequest, AnswerResponse, Evidence, TokenUsage
+from media_knowledge.qa.models import AnswerRequest, AnswerResponse, Evidence, ImageAttachment, TokenUsage
 from media_knowledge.rerank import LocalLexicalRerankProvider
 from media_knowledge.retrieval import KnowledgeRetriever
 from media_knowledge.storage import ConversationRepository, KnowledgeDatabase
@@ -87,6 +87,18 @@ class FakeWebProvider(WebSearchProvider):
                 score=0.9,
             )
         ]
+
+
+class CapturingImageProvider(AnswerProvider):
+    name = "image-test"
+    model = "vision-test"
+
+    def __init__(self) -> None:
+        self.requests: list[AnswerRequest] = []
+
+    def generate(self, request: AnswerRequest) -> AnswerResponse:
+        self.requests.append(request)
+        return AnswerResponse("图片中有一条蓝色横线。", self.model, self.name, TokenUsage())
 
 
 class KnowledgeQAIntegrationTests(unittest.TestCase):
@@ -195,6 +207,26 @@ raise SystemExit(2)
         self.assertEqual(answer.citations, [])
         self.assertEqual(answer.provider, "system")
         self.assertEqual(answer.confidence, 0.0)
+
+    def test_image_question_works_without_knowledge_evidence_and_followup_reuses_image(self) -> None:
+        image = Path(self.temp.name) / "chat-image.png"
+        image.write_bytes(b"test-image")
+        provider = CapturingImageProvider()
+        engine = KnowledgeQAEngine(self.database, EmptyRetriever(), answer_provider=provider)
+        first = engine.ask(
+            "图里是什么？",
+            image_attachments=[ImageAttachment(str(image), image.name)],
+        )
+        second = engine.ask("这个图里的颜色呢？", conversation_id=first.conversation_id)
+        self.assertEqual(first.markdown, "图片中有一条蓝色横线。")
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(len(provider.requests[0].image_attachments), 1)
+        self.assertEqual(len(provider.requests[1].image_attachments), 1)
+        record = ConversationRepository(self.database).conversation_record(first.conversation_id)
+        self.assertEqual(
+            record["messages"][0]["metadata"]["image_attachments"][0]["filename"],
+            "chat-image.png",
+        )
 
     def test_invalid_citation_is_retried_then_rejected_without_answer_record(self) -> None:
         provider = InvalidCitationProvider()

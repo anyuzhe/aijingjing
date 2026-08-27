@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-65%20passed-2F855A" alt="65 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.0.4-4C8FBF" alt="Version 2.0.4">
+    <img src="https://img.shields.io/badge/Test-68%20passed-2F855A" alt="68 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.0.5-4C8FBF" alt="Version 2.0.5">
   </p>
 </div>
 
@@ -69,6 +69,9 @@ Search does not call an LLM. The first semantic search downloads an approximatel
 ### 4. Multi-turn, citation-grounded Q&A
 
 - Continue asking follow-up questions in the same conversation.
+- Paste screenshots directly into the composer, drag images into it, or select up to four images with the attachment button.
+- Preview and remove attachments before sending; a vision model jointly understands text, images, and retrieved evidence.
+- Refer to the previous turn's image in a follow-up without attaching it again.
 - Rewrite retrieval queries using recent messages and a rolling summary.
 - Require every cited claim to use evidence from the current retrieval result.
 - Validate citation IDs against real local document and chunk IDs.
@@ -222,7 +225,7 @@ Use `AI_JINGJING_DATA_DIR` or the `--data-dir` option to select another director
 |---|---:|---|
 | Chunking, SQLite, FTS5, local semantic search | No | None |
 | Local extractive answer | No | None |
-| DeepSeek/Kimi answer | Yes | question, bounded conversation context, retrieved evidence chunks |
+| DeepSeek/Kimi answer | Yes | question, bounded conversation context, retrieved evidence chunks, and images explicitly attached by the user |
 | DeepSeek knowledge synthesis | Yes | bounded extracted text from the current import |
 | DeepSeek Vision/Kimi visual analysis | Yes | a limited set of images selected by the ingestion policy |
 
@@ -235,7 +238,7 @@ pip install pytest
 pytest -q
 ```
 
-Version 2.0.4 includes 65 automated tests covering chunking, migration, model-catalog migration, the DeepSeek Vision default, relevance sorting and false-hit filtering, two-turn desktop conversations, citations, Weixin article extraction and challenge-page blocking, quality gates, synchronization, backup/restore, and product behavior.
+Version 2.0.5 includes 68 automated tests covering chunking, migration, model-catalog migration, the DeepSeek Vision default, clipboard-image handling, multimodal request payloads, image follow-ups, relevance sorting and false-hit filtering, multi-turn desktop conversations, citations, Weixin article extraction and challenge-page blocking, quality gates, synchronization, backup/restore, and product behavior.
 
 ## Build desktop packages
 

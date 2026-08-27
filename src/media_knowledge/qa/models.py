@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..models import SourceReference, utcnow_iso
@@ -188,6 +189,53 @@ class ConversationContext:
         named = re.findall(r"\b(?:[A-Z][A-Z0-9]*)(?:-[A-Z0-9]+)+\b|\b[A-Z]{2,}[0-9]*\b", text)
         return list(dict.fromkeys(named))[-6:]
 
+    def latest_image_attachments(self, limit: int = 4) -> list["ImageAttachment"]:
+        """Return the newest usable user images so follow-ups can refer to “this image”."""
+
+        for message in reversed(self.recent_messages):
+            if message.role != "user":
+                continue
+            raw_values = message.metadata.get("image_attachments", [])
+            if not isinstance(raw_values, list):
+                continue
+            attachments: list[ImageAttachment] = []
+            for raw in raw_values:
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    attachment = ImageAttachment.from_dict(raw)
+                except (TypeError, ValueError):
+                    continue
+                if Path(attachment.local_path).is_file():
+                    attachments.append(attachment)
+            if attachments:
+                return attachments[:limit]
+        return []
+
+
+@dataclass(frozen=True, slots=True)
+class ImageAttachment:
+    """A normalized local image supplied with a chat message."""
+
+    local_path: str
+    filename: str
+    mime_type: str = "image/png"
+    width: int | None = None
+    height: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ImageAttachment":
+        return cls(
+            local_path=str(value["local_path"]),
+            filename=str(value.get("filename") or Path(str(value["local_path"])).name),
+            mime_type=str(value.get("mime_type") or "image/png"),
+            width=int(value["width"]) if value.get("width") is not None else None,
+            height=int(value["height"]) if value.get("height") is not None else None,
+        )
+
 
 @dataclass(slots=True)
 class AnswerRequest:
@@ -196,6 +244,7 @@ class AnswerRequest:
     user_prompt: str
     evidence: list[Evidence]
     response_language: str | None = None
+    image_attachments: list[ImageAttachment] = field(default_factory=list)
 
 
 @dataclass(slots=True)

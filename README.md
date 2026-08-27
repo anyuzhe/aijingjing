@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-65%20passed-2F855A" alt="65 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.0.4-4C8FBF" alt="Version 2.0.4">
+    <img src="https://img.shields.io/badge/Test-68%20passed-2F855A" alt="68 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.0.5-4C8FBF" alt="Version 2.0.5">
   </p>
 </div>
 
@@ -69,6 +69,9 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 ### 4. 连续对话与可信引用
 
 - 支持同一会话内连续多轮提问；
+- 可在提问框直接粘贴截图、拖入图片或通过按钮一次选择最多 4 张图片；
+- 发送前显示缩略图并可移除；视觉模型会联合理解文字、图片和检索证据；
+- 后续问题可继续指代上一轮图片，无需重复添加；
 - 自动使用近期消息与滚动摘要重写检索问题；
 - 回答只能引用当前检索得到的证据；
 - 引用 ID、文档 ID 和知识块 ID 会在本地数据库中校验；
@@ -222,7 +225,7 @@ AI-Jingjing/
 |---|---:|---|
 | 分块、SQLite、全文检索、本地语义检索 | 否 | 无 |
 | 本地证据回答 | 否 | 无 |
-| DeepSeek/Kimi 回答 | 是 | 问题、有限对话上下文、召回的证据块 |
+| DeepSeek/Kimi 回答 | 是 | 问题、有限对话上下文、召回的证据块，以及用户主动附加的图片 |
 | DeepSeek 知识提炼 | 是 | 当前导入资料的有界提取文本 |
 | DeepSeek Vision/Kimi 视觉理解 | 是 | 用户启用后由导入策略选中的有限图片 |
 
@@ -235,7 +238,7 @@ pip install pytest
 pytest -q
 ```
 
-当前版本包含 65 项自动化测试，覆盖分块、索引迁移、模型迁移、DeepSeek Vision 默认选择、相关性排序与误召回过滤、连续对话、引用、微信文章抓取与验证页拦截、质检、同步、备份恢复和桌面产品行为。
+当前版本包含 68 项自动化测试，覆盖分块、索引迁移、模型迁移、DeepSeek Vision 默认选择、图片粘贴与多模态请求、图片后续追问、相关性排序与误召回过滤、连续对话、引用、微信文章抓取与验证页拦截、质检、同步、备份恢复和桌面产品行为。
 
 ## 构建桌面应用
 

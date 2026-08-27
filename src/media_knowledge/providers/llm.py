@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from ..codex_cli import codex_http_transport_args
 from ..models import estimate_tokens
-from ..qa.models import AnswerRequest, AnswerResponse, Evidence, TokenUsage
+from ..qa.models import AnswerRequest, AnswerResponse, Evidence, ImageAttachment, TokenUsage
 
 
 def _cli_error_detail(stderr: str, stdout: str) -> str:
@@ -170,17 +171,35 @@ class OpenAICompatibleAnswerProvider(AnswerProvider):
             payload_path.unlink(missing_ok=True)
 
     def generate(self, request: AnswerRequest) -> AnswerResponse:
+        user_content: str | list[dict[str, object]] = request.user_prompt
+        if request.image_attachments:
+            user_content = [{"type": "text", "text": request.user_prompt}]
+            for attachment in request.image_attachments:
+                user_content.append(self._image_content(attachment))
         payload: dict[str, object] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": request.system_prompt},
-                {"role": "user", "content": request.user_prompt},
+                {"role": "user", "content": user_content},
             ],
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         body = self.request_json(payload)
         return self._answer_response(body)
+
+    @staticmethod
+    def _image_content(attachment: ImageAttachment) -> dict[str, object]:
+        path = Path(attachment.local_path).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"图片附件不存在：{attachment.filename}")
+        if path.stat().st_size > 25 * 1024 * 1024:
+            raise ValueError(f"图片附件超过 25 MB：{attachment.filename}")
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{attachment.mime_type};base64,{encoded}"},
+        }
 
     def request_json(self, payload: dict[str, object]) -> dict[str, object]:
         """Send a raw OpenAI-compatible Chat Completions payload.

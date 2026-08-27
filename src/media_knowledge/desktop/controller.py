@@ -26,7 +26,7 @@ from ..product import (
     PRODUCT_NAME,
 )
 from ..qa.engine import KnowledgeQAEngine
-from ..qa.models import KnowledgeAnswer
+from ..qa.models import ImageAttachment, KnowledgeAnswer
 from ..retrieval import KnowledgeRetriever
 from ..runtime import build_answer_provider, build_embedding_provider, build_rerank_provider
 from ..storage import KnowledgeDatabase
@@ -361,12 +361,19 @@ class DesktopController:
         tags: list[str] | None = None,
         document_ids: list[str] | None = None,
         progress: Callable[[str, str], None] | None = None,
+        image_attachments: list[ImageAttachment] | None = None,
     ) -> KnowledgeAnswer:
         config = self.config()
         requested_model = model_id or self.settings.default_model
         model_ids = {str(item["id"]) for item in self.model_choices()}
         if requested_model not in model_ids:
             requested_model = "local-extractive"
+        selected = next(
+            (item for item in self.model_choices() if str(item["id"]) == requested_model),
+            None,
+        )
+        if image_attachments and not bool(selected and selected.get("supports_images")):
+            raise ValueError("当前模型不支持图片理解，请选择带“视觉”标识的 DeepSeek Vision 或 Kimi 模型。")
         embedding = build_embedding_provider(config)
         with KnowledgeDatabase(self.paths.database) as database:
             if progress:
@@ -395,6 +402,7 @@ class DesktopController:
                 document_ids=document_ids,
                 response_language=self.settings.answer_language,
                 progress_callback=progress,
+                image_attachments=image_attachments,
             )
 
     def rebuild_search_index(self) -> dict[str, int]:

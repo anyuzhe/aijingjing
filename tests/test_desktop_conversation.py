@@ -11,6 +11,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtGui import QColor, QImage
     from media_knowledge.desktop.app import SettingsDialog, create_application
     from media_knowledge.desktop.controller import DesktopController, ProviderConfigStore
     from media_knowledge.product import DesktopSettings
@@ -20,6 +21,29 @@ except (ImportError, RuntimeError):  # pragma: no cover - desktop extra is optio
 
 @unittest.skipIf(create_application is None, "PySide6 desktop components are unavailable")
 class DesktopConversationTests(unittest.TestCase):
+    def test_pasting_clipboard_image_adds_a_sendable_thumbnail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = DesktopController(Path(temporary) / "data", migrate_legacy=False)
+            application, window = create_application(controller.paths.root)
+            try:
+                image = QImage(120, 80, QImage.Format_RGB32)
+                image.fill(QColor("#6cb6da"))
+                application.clipboard().setImage(image)
+                window.prompt.setFocus()
+                window.prompt.paste()
+                application.processEvents()
+                self.assertEqual(len(window._pending_images), 1)
+                self.assertEqual(window.attachment_list.count(), 1)
+                self.assertFalse(window.attachment_list.isHidden())
+                attachment = window._pending_images[0]
+                self.assertTrue(Path(attachment.local_path).is_file())
+                self.assertEqual((attachment.width, attachment.height), (120, 80))
+                window.remove_selected_image()
+                self.assertEqual(window._pending_images, [])
+            finally:
+                window.close()
+                application.processEvents()
+
     def test_first_deepseek_key_keeps_vision_as_default(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             controller = DesktopController(Path(temporary) / "data", migrate_legacy=False)

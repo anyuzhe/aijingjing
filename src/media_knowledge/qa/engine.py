@@ -10,7 +10,7 @@ from ..retrieval import KnowledgeRetriever
 from ..storage import ConversationRepository, KnowledgeDatabase
 from .analyzer import QuestionAnalyzer
 from .evidence import EvidenceBuilder
-from .models import AnswerRequest, AnswerResponse, KnowledgeAnswer, TokenUsage, new_id
+from .models import AnswerRequest, AnswerResponse, ImageAttachment, KnowledgeAnswer, TokenUsage, new_id
 from .prompt import build_answer_prompt
 from .rewrite import ContextualQueryRewriter, QueryRewriter
 
@@ -61,6 +61,7 @@ class KnowledgeQAEngine:
         top_k: int = 10,
         response_language: str | None = None,
         progress_callback: Callable[[str, str], None] | None = None,
+        image_attachments: list[ImageAttachment] | None = None,
     ) -> KnowledgeAnswer:
         pipeline_started = perf_counter()
         normalized_mode = mode.casefold().replace("_", "+").replace(" ", "")
@@ -71,11 +72,20 @@ class KnowledgeQAEngine:
         if top_k < 1 or top_k > 12:
             raise ValueError("V5 evidence top_k must be between 1 and 12")
 
+        supplied_images = list(image_attachments or [])[:4]
+        effective_question = question.strip() or (
+            "请仔细分析这张图片，并结合知识库说明其中的内容。" if supplied_images else ""
+        )
+        if not effective_question:
+            raise ValueError("请输入问题或添加图片")
         conversation_id = self.conversations.ensure_conversation(
-            conversation_id, title=question.strip()[:100] or None
+            conversation_id, title=effective_question[:100] or None
         )
         context = self.conversations.context(conversation_id, self.recent_context_limit)
-        analysis = self.analyzer.analyze(question)
+        analysis = self.analyzer.analyze(effective_question)
+        active_images = supplied_images or (
+            context.latest_image_attachments() if analysis.is_follow_up else []
+        )
         rewritten_query = self.query_rewriter.rewrite(analysis, context)
         question_message = self.conversations.add_message(
             conversation_id,
@@ -85,6 +95,8 @@ class KnowledgeQAEngine:
                 "analysis": analysis.to_dict(),
                 "rewritten_query": rewritten_query,
                 "requested_mode": normalized_mode,
+                "image_attachments": [item.to_dict() for item in supplied_images],
+                "reused_previous_images": bool(active_images and not supplied_images),
             },
         )
 
@@ -121,9 +133,13 @@ class KnowledgeQAEngine:
                 progress_callback("answering", "没有找到达到相关性要求的知识片段，正在整理结果")
 
         answer_started = perf_counter()
-        if evidence:
+        if evidence or active_images:
             response = self._generate_validated(
-                question, context, evidence, response_language=response_language
+                effective_question,
+                context,
+                evidence,
+                response_language=response_language,
+                image_attachments=active_images,
             )
             validation = self.citation_validator.validate(response.markdown, evidence)
             citations = self.citation_validator.citations(validation, evidence)
@@ -149,6 +165,8 @@ class KnowledgeQAEngine:
             "web_provider": self.web_search_provider.name,
             "web_available": self.web_search_provider.available,
             "response_language": response_language,
+            "image_count": len(active_images),
+            "new_image_count": len(supplied_images),
             "filters": {
                 "collections": collections or [],
                 "tags": tags or [],
@@ -176,7 +194,9 @@ class KnowledgeQAEngine:
                 "answer_and_citation_validation": round(answer_ms, 3),
             },
         }
-        confidence = self._confidence(len(evidence), len(citations), response.provider)
+        confidence = self._confidence(
+            len(evidence), len(citations), response.provider, image_count=len(active_images)
+        )
         answer = KnowledgeAnswer(
             answer_id=new_id("answer"),
             conversation_id=conversation_id,
@@ -204,13 +224,24 @@ class KnowledgeQAEngine:
         return answer
 
     def _generate_validated(
-        self, question: str, context, evidence, *, response_language: str | None = None
+        self,
+        question: str,
+        context,
+        evidence,
+        *,
+        response_language: str | None = None,
+        image_attachments: list[ImageAttachment] | None = None,
     ) -> AnswerResponse:
+        images = list(image_attachments or [])
         system_prompt, user_prompt = build_answer_prompt(
-            question, context, evidence, response_language=response_language
+            question,
+            context,
+            evidence,
+            response_language=response_language,
+            image_count=len(images),
         )
         response = self.answer_provider.generate(
-            AnswerRequest(question, system_prompt, user_prompt, evidence, response_language)
+            AnswerRequest(question, system_prompt, user_prompt, evidence, response_language, images)
         )
         validation = self.citation_validator.validate(response.markdown, evidence)
         if validation.valid:
@@ -224,9 +255,10 @@ class KnowledgeQAEngine:
             evidence,
             correction_errors=validation.errors,
             response_language=response_language,
+            image_count=len(images),
         )
         repaired = self.answer_provider.generate(
-            AnswerRequest(question, repair_system, repair_user, evidence, response_language)
+            AnswerRequest(question, repair_system, repair_user, evidence, response_language, images)
         )
         repaired.token_usage = TokenUsage(
             input_tokens=response.token_usage.input_tokens + repaired.token_usage.input_tokens,
@@ -238,9 +270,11 @@ class KnowledgeQAEngine:
         return repaired
 
     @staticmethod
-    def _confidence(evidence_count: int, citation_count: int, provider: str) -> float:
+    def _confidence(
+        evidence_count: int, citation_count: int, provider: str, *, image_count: int = 0
+    ) -> float:
         if evidence_count == 0:
-            return 0.0
+            return 0.65 if image_count else 0.0
         coverage = citation_count / evidence_count
         base = 0.5 if provider == "local-extractive" else 0.55
         return round(min(0.95, base + 0.25 * coverage + 0.02 * min(evidence_count, 5)), 3)

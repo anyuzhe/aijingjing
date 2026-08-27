@@ -4,6 +4,7 @@ import argparse
 import html
 import os
 import sys
+import uuid
 from dataclasses import replace
 from datetime import datetime
 from importlib.resources import files
@@ -12,7 +13,7 @@ from typing import Callable
 
 try:
     from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
-    from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPalette, QPixmap, QTextDocument
+    from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QImage, QImageReader, QKeySequence, QPalette, QPixmap, QTextDocument
     from PySide6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -54,6 +55,7 @@ except ImportError as exc:  # pragma: no cover - exercised by the launcher witho
 
 from ..ingestion import CancellationToken, ProgressEvent
 from ..product import DEFAULT_ANSWER_MODEL, DesktopSettings, PRODUCT_NAME
+from ..qa.models import ImageAttachment
 from .. import __version__
 from .controller import DesktopController
 from .diagnostics import run_diagnostics
@@ -168,6 +170,23 @@ class Worker(QRunnable):
 
 class PromptEdit(QPlainTextEdit):
     submit = Signal()
+    imagesPasted = Signal(object)
+
+    def canInsertFromMimeData(self, source) -> bool:  # noqa: N802
+        return bool(source.hasImage() or source.hasUrls() or super().canInsertFromMimeData(source))
+
+    def insertFromMimeData(self, source) -> None:  # noqa: N802
+        if source.hasImage():
+            self.imagesPasted.emit(source.imageData())
+            return
+        local_files = [url.toLocalFile() for url in source.urls() if url.isLocalFile()]
+        if local_files:
+            readers = [QImageReader(path) for path in local_files]
+            image_files = [path for path, reader in zip(local_files, readers) if reader.canRead()]
+            if image_files and len(image_files) == len(local_files):
+                self.imagesPasted.emit(image_files)
+                return
+        super().insertFromMimeData(source)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() in {Qt.Key_Return, Qt.Key_Enter} and event.modifiers() & Qt.ControlModifier:
@@ -484,6 +503,8 @@ class MainWindow(QMainWindow):
         self.evidence_by_id: dict[str, object] = {}
         self._answer_busy = False
         self._answer_worker: Worker | None = None
+        self._pending_images: list[ImageAttachment] = []
+        self._inflight_images: list[ImageAttachment] = []
         self._watch_scan_running = False
         self.setWindowTitle(PRODUCT_NAME)
         self.resize(1510, 920)
@@ -743,12 +764,35 @@ class MainWindow(QMainWindow):
         compose.setStyleSheet("QFrame{background:#fbfeff;border:1px solid #c5dce8;border-radius:12px;}")
         compose_layout = QVBoxLayout(compose)
         self.prompt = PromptEdit()
-        self.prompt.setPlaceholderText("向你的知识库提问……（Ctrl+Enter 发送）")
+        self.prompt.setPlaceholderText("输入问题，可直接粘贴截图或拖入图片……（Ctrl+Enter 发送）")
         self.prompt.setFixedHeight(92)
         self.prompt.setStyleSheet("border:none;background:transparent;")
         self.prompt.submit.connect(self.ask)
+        self.prompt.imagesPasted.connect(self._receive_pasted_images)
         compose_layout.addWidget(self.prompt)
+        self.attachment_list = QListWidget()
+        self.attachment_list.setViewMode(QListWidget.IconMode)
+        self.attachment_list.setFlow(QListWidget.LeftToRight)
+        self.attachment_list.setWrapping(False)
+        self.attachment_list.setIconSize(QSize(48, 48))
+        self.attachment_list.setGridSize(QSize(150, 64))
+        self.attachment_list.setFixedHeight(76)
+        self.attachment_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.attachment_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.attachment_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.attachment_list.itemDoubleClicked.connect(lambda _item: self.remove_selected_image())
+        self.attachment_list.setToolTip("已添加的图片；双击可移除")
+        self.attachment_list.hide()
+        compose_layout.addWidget(self.attachment_list)
         row = QHBoxLayout()
+        self.attach_button = QPushButton("添加图片")
+        self.attach_button.setToolTip("选择图片，也可以直接粘贴截图或把图片拖入编辑框")
+        self.attach_button.clicked.connect(self.choose_chat_images)
+        row.addWidget(self.attach_button)
+        self.remove_image_button = QPushButton("移除图片")
+        self.remove_image_button.clicked.connect(self.remove_selected_image)
+        self.remove_image_button.hide()
+        row.addWidget(self.remove_image_button)
         self.answer_status = QLabel("❄ 就绪")
         self.answer_status.setObjectName("muted")
         row.addWidget(self.answer_status)
@@ -825,6 +869,128 @@ class MainWindow(QMainWindow):
         )
         if paths:
             self.start_import(paths)
+
+    def choose_chat_images(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择用于提问的图片",
+            str(Path.home()),
+            "图片 (*.png *.jpg *.jpeg *.webp *.tif *.tiff *.bmp *.gif);;所有文件 (*)",
+        )
+        if paths:
+            self._add_chat_images(paths)
+
+    def _receive_pasted_images(self, payload: object) -> None:
+        if isinstance(payload, (list, tuple)):
+            self._add_chat_images([str(value) for value in payload])
+            return
+        if isinstance(payload, QPixmap):
+            payload = payload.toImage()
+        if isinstance(payload, QImage) and not payload.isNull():
+            try:
+                attachment = self._normalize_chat_image(
+                    payload, f"粘贴图片-{datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
+                )
+            except (OSError, ValueError) as exc:
+                self._operation_error("无法粘贴图片", str(exc))
+                return
+            self._append_pending_image(attachment)
+            self.statusBar().showMessage("已从剪贴板添加图片，可继续输入文字后发送", 5000)
+
+    def _add_chat_images(self, paths: list[str]) -> None:
+        failures: list[str] = []
+        added = 0
+        for value in paths:
+            if len(self._pending_images) >= 4:
+                failures.append("每次最多添加 4 张图片")
+                break
+            source = Path(value).expanduser().resolve()
+            try:
+                attachment = self._normalize_chat_image(source, source.name)
+            except (OSError, ValueError) as exc:
+                failures.append(f"{source.name}：{exc}")
+                continue
+            self._append_pending_image(attachment)
+            added += 1
+        if added:
+            self.statusBar().showMessage(f"已添加 {added} 张图片，可继续输入文字后发送", 5000)
+        if failures:
+            self._operation_error("部分图片未添加", "\n".join(dict.fromkeys(failures)))
+
+    def _normalize_chat_image(self, source: Path | QImage, filename: str) -> ImageAttachment:
+        if isinstance(source, Path):
+            if not source.is_file():
+                raise ValueError("文件不存在")
+            if source.stat().st_size > 25 * 1024 * 1024:
+                raise ValueError("单张图片不能超过 25 MB")
+            reader = QImageReader(str(source))
+            reader.setAutoTransform(True)
+            image = reader.read()
+            if image.isNull():
+                raise ValueError(reader.errorString() or "不是可识别的图片")
+        else:
+            image = QImage(source)
+        if image.isNull() or image.width() < 2 or image.height() < 2:
+            raise ValueError("图片为空或尺寸无效")
+        if image.width() > 4096 or image.height() > 4096:
+            image = image.scaled(
+                4096, 4096, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+        target_dir = self.controller.paths.assets / "chat-attachments"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"{uuid.uuid4().hex}.png"
+        if not image.save(str(target), "PNG"):
+            raise OSError("无法保存规范化图片")
+        if target.stat().st_size > 25 * 1024 * 1024:
+            target.unlink(missing_ok=True)
+            raise ValueError("处理后的图片仍超过 25 MB")
+        return ImageAttachment(
+            local_path=str(target),
+            filename=filename,
+            mime_type="image/png",
+            width=image.width(),
+            height=image.height(),
+        )
+
+    def _append_pending_image(self, attachment: ImageAttachment) -> None:
+        if len(self._pending_images) >= 4:
+            self.statusBar().showMessage("每次最多添加 4 张图片", 5000)
+            return
+        self._pending_images.append(attachment)
+        self._refresh_attachment_list()
+
+    def _refresh_attachment_list(self) -> None:
+        self.attachment_list.clear()
+        for attachment in self._pending_images:
+            item = QListWidgetItem(QIcon(attachment.local_path), attachment.filename)
+            item.setData(Qt.UserRole, attachment.local_path)
+            item.setToolTip(
+                f"{attachment.filename}\n{attachment.width or '?'} × {attachment.height or '?'}\n双击移除"
+            )
+            self.attachment_list.addItem(item)
+        visible = bool(self._pending_images)
+        self.attachment_list.setVisible(visible)
+        self.remove_image_button.setVisible(visible)
+        if visible:
+            self.attachment_list.setCurrentRow(0)
+            self.answer_status.setText(f"已添加 {len(self._pending_images)} 张图片 · 将发送给视觉模型")
+        elif not self._answer_busy:
+            self.answer_status.setText("❄ 就绪")
+
+    def remove_selected_image(self) -> None:
+        row = self.attachment_list.currentRow()
+        if row < 0 or row >= len(self._pending_images):
+            return
+        removed = self._pending_images.pop(row)
+        Path(removed.local_path).unlink(missing_ok=True)
+        self._refresh_attachment_list()
+
+    def _clear_pending_images(self, *, delete_files: bool = False) -> None:
+        if delete_files:
+            for attachment in self._pending_images:
+                Path(attachment.local_path).unlink(missing_ok=True)
+        self._pending_images = []
+        self._refresh_attachment_list()
 
     def add_url(self) -> None:
         value, accepted = QInputDialog.getText(
@@ -1094,11 +1260,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("上一条回答仍在生成，请稍候；当前输入不会丢失。", 5000)
             return
         question = self.prompt.toPlainText().strip()
-        if not question:
+        images = list(self._pending_images)
+        if not question and not images:
             return
-        self.last_question = question
+        effective_question = question or "请仔细分析这张图片，并结合知识库说明其中的内容。"
+        self.last_question = effective_question
         self.prompt.clear()
-        self._append_user(question)
+        self._inflight_images = images
+        self._clear_pending_images()
+        self._append_user(question, images)
         self._set_answer_busy(True)
         self.answer_status.setText("正在检索选定知识…")
         model_id = str(self.model_combo.currentData() or "local-extractive")
@@ -1108,19 +1278,22 @@ class MainWindow(QMainWindow):
 
         def execute(signals: WorkerSignals):
             return self.controller.ask(
-                question,
+                effective_question,
                 conversation_id=conversation,
                 model_id=model_id,
                 deep_analysis=deep,
                 document_ids=document_ids,
                 collections=collections,
                 progress=lambda stage, message: signals.progress.emit((stage, message)),
+                image_attachments=images,
             )
 
         worker = Worker(execute)
         worker.signals.progress.connect(lambda value: self.answer_status.setText(value[1]))
         worker.signals.result.connect(self._answer_complete)
-        worker.signals.error.connect(lambda message: self._answer_error(message))
+        worker.signals.error.connect(
+            lambda message: self._answer_error(message, question=question, images=images)
+        )
         worker.signals.finished.connect(self._finish_answer_request)
         self._answer_worker = worker
         self.thread_pool.start(worker)
@@ -1154,16 +1327,25 @@ class MainWindow(QMainWindow):
         collection = str(self.collection_filter.currentData() or "")
         return None, [collection] if collection else None
 
-    def _append_user(self, text: str) -> None:
+    def _append_user(self, text: str, images: list[ImageAttachment] | None = None) -> None:
+        attachments = "".join(
+            "<div style='display:inline-block;margin:4px 4px 8px 0'>"
+            f"<img src='{html.escape(QUrl.fromLocalFile(item.local_path).toString())}' "
+            "width='150' style='border-radius:9px'/><br>"
+            f"<span style='font-size:10px;color:#d8eff9'>{html.escape(item.filename)}</span></div>"
+            for item in (images or [])
+        )
+        body = html.escape(text).replace(chr(10), "<br>") if text else "请分析这些图片"
         self.chat.append(
             f"<div style='margin:18px 8px 6px 22%;text-align:right;color:#6a8495;font-size:11px'>你</div>"
             f"<div style='margin:0 8px 18px 22%;background:#1b5578;color:white;padding:12px 15px;border-radius:14px'>"
-            f"{html.escape(text).replace(chr(10), '<br>')}</div>"
+            f"{attachments}{body}</div>"
         )
         self.chat.verticalScrollBar().setValue(self.chat.verticalScrollBar().maximum())
 
     def _answer_complete(self, answer) -> None:
         self._finish_answer_request()
+        self._inflight_images = []
         self.last_answer = answer
         self.conversation_id = answer.conversation_id
         rendered = _markdown_html(answer.markdown)
@@ -1190,7 +1372,15 @@ class MainWindow(QMainWindow):
                 f"，来自 {len(citation_sources)} 份资料 · {answer.confidence:.0%} 有据可查"
             )
         else:
-            self.answer_status.setText(f"{answer.model} · 未采用引用 · {answer.confidence:.0%} 可信度")
+            image_count = int(answer.retrieval_info.get("image_count") or 0)
+            if image_count:
+                self.answer_status.setText(
+                    f"{answer.model} · 已理解 {image_count} 张图片 · 图片观察不计知识库引用"
+                )
+            else:
+                self.answer_status.setText(
+                    f"{answer.model} · 未采用引用 · {answer.confidence:.0%} 可信度"
+                )
         self.evidence_by_id.clear()
         self.evidence_list.clear()
         for evidence in answer.evidence:
@@ -1202,8 +1392,22 @@ class MainWindow(QMainWindow):
             self.evidence_list.setCurrentRow(0)
         self._refresh_status()
 
-    def _answer_error(self, message: str) -> None:
+    def _answer_error(
+        self,
+        message: str,
+        *,
+        question: str = "",
+        images: list[ImageAttachment] | None = None,
+    ) -> None:
         self._finish_answer_request()
+        if question and not self.prompt.toPlainText().strip():
+            self.prompt.setPlainText(question)
+        if images:
+            for attachment in images:
+                if all(item.local_path != attachment.local_path for item in self._pending_images):
+                    self._pending_images.append(attachment)
+            self._refresh_attachment_list()
+        self._inflight_images = []
         self.answer_status.setText("回答失败")
         self.chat.append(
             f"<div style='margin:8px 20% 20px 8px;background:#fff3f5;color:#934552;border:1px solid #efd3da;padding:14px;border-radius:12px'>"
@@ -1278,6 +1482,8 @@ class MainWindow(QMainWindow):
         self.evidence_by_id.clear()
         self.preview.clear()
         self.answer_status.setText("❄ 就绪")
+        self.prompt.clear()
+        self._clear_pending_images(delete_files=True)
 
     def open_source_reader(self) -> None:
         document_id = None
