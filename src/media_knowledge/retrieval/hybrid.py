@@ -34,6 +34,40 @@ class KnowledgeRetriever:
         return re.sub(r"\s+", " ", query).strip()
 
     @staticmethod
+    def _score(candidate: SearchCandidate) -> float:
+        return candidate.rerank_score if candidate.rerank_score is not None else candidate.fused_score
+
+    def _rank_relevant(self, candidates: list[SearchCandidate], top_k: int) -> list[SearchCandidate]:
+        ranked = sorted(
+            candidates,
+            key=lambda item: (-self._score(item), -item.fused_score, item.chunk_id),
+        )
+        if not ranked:
+            return []
+
+        if self.rerank_provider.name == "local-lexical":
+            strongest_overlap = max((item.lexical_overlap or 0.0) for item in ranked)
+            if strongest_overlap > 0:
+                overlap_floor = max(0.03, strongest_overlap * 0.25)
+                score_floor = self._score(ranked[0]) * 0.25
+                ranked = [
+                    item for item in ranked
+                    if (item.lexical_overlap or 0.0) >= overlap_floor
+                    and self._score(item) >= score_floor
+                ]
+            elif self.embedding_provider.name == "local-hash":
+                # Feature hashing is not semantic enough to justify unrelated zero-overlap hits.
+                ranked = []
+            else:
+                score_floor = self._score(ranked[0]) * 0.55
+                ranked = [item for item in ranked if self._score(item) >= score_floor]
+        elif self.rerank_provider.name == "api":
+            score_floor = max(0.15, self._score(ranked[0]) * 0.35)
+            ranked = [item for item in ranked if self._score(item) >= score_floor]
+
+        return ranked[:top_k]
+
+    @staticmethod
     def _fts_query(query: str) -> str:
         tokens = re.findall(r"[A-Za-z0-9_+-]+|[\u3400-\u9fff]+", query)
         safe = [token.replace('"', '""') for token in tokens if token.strip()]
@@ -102,7 +136,10 @@ class KnowledgeRetriever:
                     keyword_score=keyword_scores.get(chunk_id),
                 )
             )
-        ranked = self.rerank_provider.rerank(normalized, candidates)[:top_k]
+        ranked = self._rank_relevant(
+            self.rerank_provider.rerank(normalized, candidates),
+            top_k,
+        )
         results = []
         for candidate in ranked:
             source = candidate.source_reference
@@ -124,6 +161,7 @@ class KnowledgeRetriever:
                         "vector_score": candidate.vector_score,
                         "keyword_score": candidate.keyword_score,
                         "rerank_score": candidate.rerank_score,
+                        "lexical_overlap": candidate.lexical_overlap,
                     },
                 )
             )

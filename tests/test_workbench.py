@@ -117,6 +117,8 @@ class WorkbenchIntegrationTests(unittest.TestCase):
         self.assertIn("delta", {event["type"] for event in events})
         statuses = [event for event in events if event["type"] == "status"]
         self.assertEqual([event["stage"] for event in statuses], ["retrieving", "answering", "finalizing"])
+        self.assertIn("已按相关性选出", statuses[1]["message"])
+        self.assertIn("候选片段，来自 1 份资料", statuses[1]["message"])
         self.assertIn("正在生成中文回答", statuses[1]["message"])
         answer = next(event["answer"] for event in events if event["type"] == "final")
         self.assertTrue(answer["citations"])

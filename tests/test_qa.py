@@ -273,6 +273,8 @@ raise SystemExit(2)
             progress_callback=lambda stage, message: progress.append((stage, message)),
         )
         self.assertEqual(progress[0][0], "answering")
+        self.assertIn("已按相关性选出", progress[0][1])
+        self.assertIn("候选片段，来自 1 份资料", progress[0][1])
         self.assertIn("正在生成中文回答", progress[0][1])
 
 

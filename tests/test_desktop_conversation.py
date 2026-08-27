@@ -62,6 +62,8 @@ class DesktopConversationTests(unittest.TestCase):
                         conversation_id = window.conversation_id
                     self.assertEqual(window.conversation_id, conversation_id)
                 self.assertEqual(len(set(answer_ids)), 2)
+                self.assertIn("实际引用", window.answer_status.text())
+                self.assertIn("份资料", window.answer_status.text())
             finally:
                 window.close()
                 application.processEvents()

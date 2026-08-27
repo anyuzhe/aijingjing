@@ -1174,7 +1174,20 @@ class MainWindow(QMainWindow):
             f"<div style='margin:0 20% 20px 8px;background:#fbfeff;border:1px solid #c7e0ec;padding:14px;border-radius:14px'>{rendered}</div>"
         )
         self.chat.verticalScrollBar().setValue(self.chat.verticalScrollBar().maximum())
-        self.answer_status.setText(f"{answer.model} · {answer.confidence:.0%} 有据可查")
+        citation_sources = {
+            citation.document_id
+            or citation.original_uri
+            or citation.local_path
+            or citation.title
+            for citation in answer.citations
+        }
+        if answer.citations:
+            self.answer_status.setText(
+                f"{answer.model} · 实际引用 {len(answer.citations)} 条证据"
+                f"，来自 {len(citation_sources)} 份资料 · {answer.confidence:.0%} 有据可查"
+            )
+        else:
+            self.answer_status.setText(f"{answer.model} · 未采用引用 · {answer.confidence:.0%} 可信度")
         self.evidence_by_id.clear()
         self.evidence_list.clear()
         for evidence in answer.evidence:

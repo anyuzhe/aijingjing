@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-58%20passed-2F855A" alt="58 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.0.2-4C8FBF" alt="Version 2.0.2">
+    <img src="https://img.shields.io/badge/Test-59%20passed-2F855A" alt="59 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.0.3-4C8FBF" alt="Version 2.0.3">
   </p>
 </div>
 
@@ -60,6 +60,7 @@ A restricted video page that exposes only a cover and description is rejected in
 - local multilingual semantic embeddings;
 - vector and BM25 candidate recall;
 - Reciprocal Rank Fusion and local reranking;
+- automatic final relevance sorting with clearly unrelated candidates removed;
 - filters for spaces, tags, media types, folders, and exact documents;
 - visible fused, semantic, and keyword-hit diagnostics.
 
@@ -234,7 +235,7 @@ pip install pytest
 pytest -q
 ```
 
-Version 2.0.2 includes 58 automated tests covering chunking, migration, retrieval, two-turn desktop conversations, citations, Weixin article extraction and challenge-page blocking, quality gates, synchronization, backup/restore, and product behavior.
+Version 2.0.3 includes 59 automated tests covering chunking, migration, relevance sorting and false-hit filtering, two-turn desktop conversations, citations, Weixin article extraction and challenge-page blocking, quality gates, synchronization, backup/restore, and product behavior.
 
 ## Build desktop packages
 

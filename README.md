@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-58%20passed-2F855A" alt="58 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.0.2-4C8FBF" alt="Version 2.0.2">
+    <img src="https://img.shields.io/badge/Test-59%20passed-2F855A" alt="59 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.0.3-4C8FBF" alt="Version 2.0.3">
   </p>
 </div>
 
@@ -60,6 +60,7 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 - 本地中英文语义 Embedding；
 - 向量召回与 BM25 召回融合；
 - RRF 融合与本地重排；
+- 按最终相关性自动排序并剔除明显无关的候选片段；
 - 按知识空间、标签、资料类型或指定文档限定范围；
 - 展示融合分数、语义分数和全文命中状态。
 
@@ -234,7 +235,7 @@ pip install pytest
 pytest -q
 ```
 
-当前版本包含 58 项自动化测试，覆盖分块、索引迁移、检索、连续对话、引用、微信文章抓取与验证页拦截、质检、同步、备份恢复和桌面产品行为。
+当前版本包含 59 项自动化测试，覆盖分块、索引迁移、相关性排序与误召回过滤、连续对话、引用、微信文章抓取与验证页拦截、质检、同步、备份恢复和桌面产品行为。
 
 ## 构建桌面应用
 

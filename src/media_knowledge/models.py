@@ -141,6 +141,7 @@ class SearchCandidate:
     vector_score: float | None = None
     keyword_score: float | None = None
     rerank_score: float | None = None
+    lexical_overlap: float | None = None
 
 
 @dataclass(slots=True)

@@ -112,12 +112,13 @@ class KnowledgeQAEngine:
 
         if progress_callback:
             if evidence:
+                source_count = self.evidence_builder.source_count(evidence)
                 progress_callback(
                     "answering",
-                    f"已检索到 {len(evidence)} 条证据，正在生成中文回答",
+                    f"已按相关性选出 {len(evidence)} 个候选片段，来自 {source_count} 份资料，正在生成中文回答",
                 )
             else:
-                progress_callback("answering", "当前范围没有匹配证据，正在整理结果")
+                progress_callback("answering", "没有找到达到相关性要求的知识片段，正在整理结果")
 
         answer_started = perf_counter()
         if evidence:

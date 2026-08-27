@@ -82,6 +82,12 @@ class HybridRetrievalIntegrationTests(unittest.TestCase):
         self.assertTrue(first.document_id)
         self.assertTrue(first.chunk_id)
 
+    def test_results_are_relevance_sorted_and_unrelated_hash_hits_are_filtered(self) -> None:
+        results = self.retriever.search_knowledge("FAST-LIVO2 camera fusion", top_k=10)
+        self.assertEqual([item.title for item in results], ["FAST-LIVO2 Paper"])
+        self.assertGreater(results[0].debug["lexical_overlap"], 0)
+        self.assertEqual(self.retriever.search_knowledge("量子计算天气", top_k=10), [])
+
     def test_collection_tag_and_media_filters_are_applied(self) -> None:
         self.assertEqual(
             self.retriever.search_knowledge("dough", collections=["SLAM"], top_k=5), []

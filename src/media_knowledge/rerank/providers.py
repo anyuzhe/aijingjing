@@ -36,15 +36,20 @@ class LocalLexicalRerankProvider(RerankProvider):
         max_keyword = max((candidate.keyword_score or 0.0 for candidate in candidates), default=1.0) or 1.0
         max_vector = max((candidate.vector_score or 0.0 for candidate in candidates), default=1.0) or 1.0
         for candidate in candidates:
-            candidate_terms = _terms(candidate.title + "\n" + candidate.content)
-            overlap = len(query_terms & candidate_terms) / max(1, len(query_terms))
+            title_overlap = len(query_terms & _terms(candidate.title)) / max(1, len(query_terms))
+            content_overlap = len(query_terms & _terms(candidate.content)) / max(1, len(query_terms))
+            candidate.lexical_overlap = max(content_overlap, title_overlap * 0.65)
             candidate.rerank_score = (
-                0.55 * overlap
+                0.45 * content_overlap
+                + 0.10 * title_overlap
                 + 0.20 * (candidate.fused_score / max_fused)
                 + 0.15 * ((candidate.keyword_score or 0.0) / max_keyword)
                 + 0.10 * ((candidate.vector_score or 0.0) / max_vector)
             )
-        return sorted(candidates, key=lambda item: (-(item.rerank_score or 0.0), -item.fused_score, item.chunk_id))
+        return sorted(
+            candidates,
+            key=lambda item: (-(item.rerank_score or 0.0), -item.fused_score, item.chunk_id),
+        )
 
 
 class HTTPRerankProvider(RerankProvider):

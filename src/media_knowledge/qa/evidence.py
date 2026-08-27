@@ -19,7 +19,7 @@ class EvidenceBuilder:
             seen_chunks.add(result.chunk_id)
             evidence.append(
                 Evidence(
-                    evidence_id=f"S{len(evidence) + 1}",
+                    evidence_id="",
                     content=result.content,
                     title=result.title,
                     score=result.score,
@@ -38,7 +38,7 @@ class EvidenceBuilder:
             )
             evidence.append(
                 Evidence(
-                    evidence_id=f"S{len(evidence) + 1}",
+                    evidence_id="",
                     content=hit.content,
                     title=hit.title,
                     score=hit.score,
@@ -46,7 +46,21 @@ class EvidenceBuilder:
                     source_kind="web",
                 )
             )
+        evidence.sort(key=lambda item: (-item.score, item.title, item.source.source_id))
+        for index, item in enumerate(evidence, 1):
+            item.evidence_id = f"S{index}"
         return evidence
+
+    @staticmethod
+    def source_count(evidence: list[Evidence]) -> int:
+        identities = {
+            item.source.document_id
+            or item.source.original_uri
+            or item.source.local_path
+            or item.source.source_id
+            for item in evidence
+        }
+        return len(identities)
 
     @staticmethod
     def context(evidence: list[Evidence], max_characters_per_item: int = 3600) -> str:
