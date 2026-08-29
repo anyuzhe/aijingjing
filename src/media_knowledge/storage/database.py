@@ -8,7 +8,8 @@ from typing import Any, Iterable, Sequence
 from ..models import KnowledgeChunk, KnowledgeDocument, SearchFilters, SourceReference, utcnow_iso
 
 
-SCHEMA_VERSION = 8
+BASE_SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 
 class KnowledgeDatabase:
@@ -258,10 +259,15 @@ class KnowledgeDatabase:
                 self.connection.execute(
                     "ALTER TABLE documents ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
                 )
+            # Versions 1-8 were historically maintained by the idempotent base schema
+            # above.  Keep that compatibility baseline, then apply every later change as
+            # an explicit, recorded migration so existing user databases are upgraded
+            # without relying on the final CREATE TABLE declarations alone.
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION, utcnow_iso()),
+                (BASE_SCHEMA_VERSION, utcnow_iso()),
             )
+            self._apply_incremental_migrations()
             missing_references = self.connection.execute(
                 """SELECT c.id, c.document_id, c.source_reference_json
                    FROM chunks c LEFT JOIN source_references sr ON sr.chunk_id=c.id
@@ -274,6 +280,96 @@ class KnowledgeDatabase:
                     SourceReference.from_dict(json.loads(row["source_reference_json"])),
                 )
             self.connection.execute("PRAGMA optimize")
+
+    def _apply_incremental_migrations(self) -> None:
+        applied = {
+            int(row["version"])
+            for row in self.connection.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        migrations = (
+            (9, self._migrate_answer_feedback),
+            (10, self._migrate_ingestion_jobs),
+        )
+        for version, migration in migrations:
+            if version in applied:
+                continue
+            migration()
+            self.connection.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (version, utcnow_iso()),
+            )
+
+    def _migrate_answer_feedback(self) -> None:
+        self.connection.execute(
+            """CREATE TABLE IF NOT EXISTS answer_feedback (
+                   answer_id TEXT PRIMARY KEY REFERENCES answers(id) ON DELETE CASCADE,
+                   rating TEXT NOT NULL CHECK(rating IN ('up', 'down')),
+                   reason TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+               )"""
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_answer_feedback_rating ON answer_feedback(rating, updated_at DESC)"
+        )
+
+    def _migrate_ingestion_jobs(self) -> None:
+        self.connection.execute(
+            """CREATE TABLE IF NOT EXISTS ingestion_jobs (
+                   id TEXT PRIMARY KEY,
+                   status TEXT NOT NULL CHECK(status IN (
+                       'queued', 'running', 'completed', 'failed', 'cancelled'
+                   )),
+                   total_items INTEGER NOT NULL DEFAULT 0 CHECK(total_items >= 0),
+                   completed_items INTEGER NOT NULL DEFAULT 0 CHECK(completed_items >= 0),
+                   succeeded_items INTEGER NOT NULL DEFAULT 0 CHECK(succeeded_items >= 0),
+                   failed_items INTEGER NOT NULL DEFAULT 0 CHECK(failed_items >= 0),
+                   cancelled_items INTEGER NOT NULL DEFAULT 0 CHECK(cancelled_items >= 0),
+                   progress_percent INTEGER NOT NULL DEFAULT 0 CHECK(
+                       progress_percent >= 0 AND progress_percent <= 100
+                   ),
+                   current_item TEXT,
+                   current_stage TEXT,
+                   message TEXT NOT NULL DEFAULT '',
+                   error TEXT,
+                   metadata_json TEXT NOT NULL DEFAULT '{}',
+                   created_at TEXT NOT NULL,
+                   started_at TEXT,
+                   completed_at TEXT,
+                   updated_at TEXT NOT NULL
+               )"""
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_status_updated "
+            "ON ingestion_jobs(status, updated_at DESC)"
+        )
+        self.connection.execute(
+            """CREATE TABLE IF NOT EXISTS ingestion_job_items (
+                   id TEXT PRIMARY KEY,
+                   job_id TEXT NOT NULL REFERENCES ingestion_jobs(id) ON DELETE CASCADE,
+                   ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                   source TEXT NOT NULL,
+                   status TEXT NOT NULL CHECK(status IN (
+                       'queued', 'running', 'completed', 'failed', 'cancelled'
+                   )),
+                   progress_percent INTEGER NOT NULL DEFAULT 0 CHECK(
+                       progress_percent >= 0 AND progress_percent <= 100
+                   ),
+                   stage TEXT NOT NULL DEFAULT 'queued',
+                   message TEXT NOT NULL DEFAULT '',
+                   result_json TEXT NOT NULL DEFAULT '{}',
+                   error TEXT,
+                   created_at TEXT NOT NULL,
+                   started_at TEXT,
+                   completed_at TEXT,
+                   updated_at TEXT NOT NULL,
+                   UNIQUE(job_id, ordinal)
+               )"""
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ingestion_job_items_job_status "
+            "ON ingestion_job_items(job_id, status, ordinal)"
+        )
 
     def get_document_by_source_id(self, source_id: str) -> sqlite3.Row | None:
         return self.connection.execute(
@@ -909,7 +1005,8 @@ class KnowledgeDatabase:
         for table in (
             "documents", "chunks", "source_references", "embeddings", "collections", "tags",
             "conversations", "messages", "answers", "answer_evidence", "citations",
-            "annotations", "watched_folders", "artifacts",
+            "answer_feedback", "annotations", "watched_folders", "artifacts",
+            "ingestion_jobs", "ingestion_job_items",
         ):
             counts[table] = self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         states = {

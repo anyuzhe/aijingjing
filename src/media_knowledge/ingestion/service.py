@@ -59,6 +59,7 @@ class IngestionResult:
 @dataclass(slots=True)
 class IngestionSummary:
     results: list[IngestionResult] = field(default_factory=list)
+    job_id: str | None = None
     started_at: str = field(default_factory=utcnow_iso)
     completed_at: str = ""
     duration_ms: float = 0.0
@@ -81,6 +82,7 @@ class IngestionSummary:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "job_id": self.job_id,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "duration_ms": self.duration_ms,

@@ -7,12 +7,14 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-68%20passed-2F855A" alt="68 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.0.5-4C8FBF" alt="Version 2.0.5">
+    <img src="https://img.shields.io/badge/Test-95%20passed-2F855A" alt="95 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.1.0-4C8FBF" alt="Version 2.1.0">
   </p>
 </div>
 
 AI Jingjing turns PDFs, PowerPoint decks, Word files, images, audio, video, web pages, and Markdown into one searchable local knowledge base with multi-turn Q&A and precise source traceability.
+
+See [CHANGELOG.md](CHANGELOG.md) for release changes.
 
 It is a standalone desktop application. End users do not need Codex, Obsidian, Python, or a separate FFmpeg installation. Obsidian is an optional sync/export target. Cloud models such as DeepSeek and Kimi are contacted only when the user explicitly requests an AI answer, knowledge synthesis, or visual understanding.
 
@@ -69,6 +71,9 @@ Search does not call an LLM. The first semantic search downloads an approximatel
 ### 4. Multi-turn, citation-grounded Q&A
 
 - Continue asking follow-up questions in the same conversation.
+- Persist, search, reopen, rename, delete, and export conversations as Markdown.
+- Stream cloud-model answers as they are generated, with stop-and-keep-partial-output behavior.
+- Copy, regenerate, and store local helpful/needs-improvement feedback for every answer.
 - Paste screenshots directly into the composer, drag images into it, or select up to four images with the attachment button.
 - Preview and remove attachments before sending; a vision model jointly understands text, images, and retrieved evidence.
 - Refer to the previous turn's image in a follow-up without attaching it again.
@@ -77,6 +82,10 @@ Search does not call an LLM. The first semantic search downloads an approximatel
 - Validate citation IDs against real local document and chunk IDs.
 - Click an inline citation to open the source reader at the matching page or timestamp.
 - Return an explicit insufficient-evidence response instead of inventing facts.
+
+Context selection is adaptive: focused retrieval for ordinary questions, full context for a selected small document, and hierarchical sampling for long courses or reports. The evidence panel reports well-supported, partially supported, limited, image-only, or insufficient evidence and explains citation coverage, evidence utilization, source diversity, and the reasons behind the label. These are inspectable support metrics—not a fabricated probability that an answer is correct.
+
+Retrieved text is always serialized as untrusted evidence data. Instruction-like content is flagged, and the answer policy explicitly forbids following commands, role overrides, prompt-exfiltration requests, or tool instructions found inside sources.
 
 Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence model. Once DeepSeek is configured, the image-capable experimental `deepseek-v4-flash-vision-exp` model is selected by default. Retrieval itself remains local and model-independent.
 
@@ -93,6 +102,8 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 ### 6. Automation and knowledge workshop
 
 - Watch one or more folders and ingest changes incrementally.
+- Persist every import batch and per-file stage, progress, error, and structured result.
+- Recover interrupted work as resumable tasks after an unexpected exit and retry failed items.
 - Reparse changed files only.
 - Disable missing sources instead of silently destroying knowledge.
 - Optionally sync from Obsidian or export AI Jingjing notes to a vault.
@@ -103,8 +114,9 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 - Keep documents, chunks, conversations, answers, evidence, and citations in local SQLite.
 - Store API keys in macOS Keychain or the platform credential store when available.
 - Explicitly exclude API keys from application backups.
-- Provide full backups, pre-restore safety snapshots, integrity checks, and FTS repair.
-- Accept update manifests over HTTPS only.
+- V2 full backups cover the database, settings, notes, original archives, retained assets, and transcripts, with per-file size and SHA-256 metadata.
+- Validate paths, compression ratios, size limits, hashes, SQLite integrity, and settings before creating a safety snapshot and atomically restoring data.
+- Accept only HTTPS update manifests and redirects; download packages to a temporary file and open them only after the manifest SHA-256 matches.
 - Exclude personal databases, model caches, archives, credentials, and build outputs from Git.
 
 ## Supported inputs
@@ -138,12 +150,14 @@ PySide6 Desktop UI
         │   └── Conversations / Evidence / Citations
         │
         ├── KnowledgeRetriever
-        │   └── Semantic Vector + BM25 + RRF + Rerank
+        │   ├── Semantic Vector + BM25 + RRF + Rerank
+        │   └── Focused / Full Context / Hierarchical
         │
         └── KnowledgeQAEngine
             ├── Contextual query rewriting
             ├── DeepSeek / Kimi / Local Extractive
-            └── Evidence construction and citation validation
+            ├── Untrusted-evidence boundary and prompt-injection defense
+            └── Evidence construction, citation validation, quality explanation
 ```
 
 ## Quick start
@@ -193,6 +207,9 @@ knowledge ask "What is FDE?"
 knowledge index-status
 knowledge doctor
 knowledge reindex
+
+# Evaluate retrieval and citations with a local golden dataset
+knowledge eval docs/golden-evaluation.example.json --top-k 10
 ```
 
 Search and Q&A support scope options including `--collection`, `--tag`, `--media-type`, `--folder`, and `--document-id`.
@@ -238,7 +255,9 @@ pip install pytest
 pytest -q
 ```
 
-Version 2.0.5 includes 68 automated tests covering chunking, migration, model-catalog migration, the DeepSeek Vision default, clipboard-image handling, multimodal request payloads, image follow-ups, relevance sorting and false-hit filtering, multi-turn desktop conversations, citations, Weixin article extraction and challenge-page blocking, quality gates, synchronization, backup/restore, and product behavior.
+Version 2.1.0 includes 95 automated tests covering chunking, database migration, model selection, real streaming output, clipboard-image handling, multimodal requests, image follow-ups, adaptive context, evidence quality, prompt-injection defenses, persistent conversation history, answer feedback, resumable ingestion jobs, citations, Weixin extraction and challenge-page blocking, V1/V2 restore compatibility, secure updates, and desktop behavior.
+
+The repository also includes a local golden-set evaluation framework for Hit Rate@K, MRR, Citation Precision, and Citation Coverage. Replace the placeholder document and chunk IDs in the example with IDs from your own library, then run `knowledge eval`; add `--retrieval-only` to evaluate retrieval without answer generation.
 
 ## Build desktop packages
 
@@ -255,6 +274,8 @@ Windows PowerShell:
 ```
 
 Public macOS distribution requires an Apple Developer ID. `packaging/sign_and_notarize.sh` implements the signing and notarization workflow.
+
+GitHub Actions runs tests on Linux, macOS, and Windows and produces unsigned macOS/Windows build artifacts. Before a public release, follow `packaging/RELEASE_SECURITY.md` for platform signing, notarization, SHA-256 manifest generation, and release verification.
 
 ## Repository layout
 

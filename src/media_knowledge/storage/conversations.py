@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from ..models import SourceReference, utcnow_iso
+from ..models import utcnow_iso
 from ..qa.models import (
     ConversationContext,
     ConversationMessage,
@@ -15,8 +15,98 @@ from .database import KnowledgeDatabase
 
 
 class ConversationRepository:
+    MAX_PAGE_SIZE = 500
+
     def __init__(self, database: KnowledgeDatabase):
         self.database = database
+
+    @classmethod
+    def _page(cls, limit: int, offset: int) -> tuple[int, int]:
+        try:
+            safe_limit = int(limit)
+            safe_offset = int(offset)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("limit 和 offset 必须是整数") from exc
+        return max(1, min(cls.MAX_PAGE_SIZE, safe_limit)), max(0, safe_offset)
+
+    def list_conversations(
+        self,
+        query: str = "",
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded, newest-first page suitable for conversation history UIs."""
+
+        safe_limit, safe_offset = self._page(limit, offset)
+        term = re.sub(r"\s+", " ", str(query or "")).strip()[:200]
+        where = ""
+        parameters: list[Any] = []
+        if term:
+            escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            where = """WHERE (
+                COALESCE(c.title, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+                OR c.summary LIKE ? ESCAPE '\\' COLLATE NOCASE
+                OR EXISTS (
+                    SELECT 1 FROM messages search_message
+                    WHERE search_message.conversation_id=c.id
+                      AND search_message.content LIKE ? ESCAPE '\\' COLLATE NOCASE
+                )
+            )"""
+            parameters.extend((pattern, pattern, pattern))
+        rows = self.database.connection.execute(
+            f"""SELECT c.*,
+                       (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id)
+                           AS message_count,
+                       (SELECT COUNT(*) FROM answers a WHERE a.conversation_id=c.id)
+                           AS answer_count,
+                       (SELECT m.content FROM messages m WHERE m.conversation_id=c.id
+                        ORDER BY m.ordinal DESC LIMIT 1) AS last_message
+                FROM conversations c
+                {where}
+                ORDER BY c.updated_at DESC, c.id DESC
+                LIMIT ? OFFSET ?""",
+            (*parameters, safe_limit, safe_offset),
+        ).fetchall()
+        return [
+            {
+                "conversation_id": str(row["id"]),
+                "title": str(row["title"] or "").strip() or "新对话",
+                "summary": str(row["summary"] or ""),
+                "message_count": int(row["message_count"] or 0),
+                "answer_count": int(row["answer_count"] or 0),
+                "last_message": str(row["last_message"] or ""),
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+            }
+            for row in rows
+        ]
+
+    def search_conversations(
+        self, query: str, *, limit: int = 200, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        return self.list_conversations(query, limit=limit, offset=offset)
+
+    def rename_conversation(self, conversation_id: str, title: str) -> bool:
+        clean_title = re.sub(r"\s+", " ", str(title or "")).strip()
+        if not clean_title:
+            raise ValueError("对话标题不能为空")
+        if len(clean_title) > 200:
+            raise ValueError("对话标题不能超过 200 个字符")
+        with self.database.connection:
+            cursor = self.database.connection.execute(
+                "UPDATE conversations SET title=?, updated_at=? WHERE id=?",
+                (clean_title, utcnow_iso(), conversation_id),
+            )
+        return cursor.rowcount > 0
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        with self.database.connection:
+            cursor = self.database.connection.execute(
+                "DELETE FROM conversations WHERE id=?", (conversation_id,)
+            )
+        return cursor.rowcount > 0
 
     def ensure_conversation(self, conversation_id: str | None = None, title: str | None = None) -> str:
         if conversation_id:
@@ -266,6 +356,106 @@ class ConversationRepository:
             "answers": [self.answer_record(answer_id) for answer_id in answer_ids],
         }
 
+    def conversation_markdown(self, conversation_id: str) -> str:
+        """Build a portable Markdown transcript with answer evidence and feedback."""
+
+        record = self.conversation_record(conversation_id)
+        answers_by_message = {
+            str(answer["answer_message_id"]): answer for answer in record["answers"]
+        }
+        title = str(record.get("title") or "新对话").strip() or "新对话"
+        lines = [
+            "---",
+            f"conversation_id: {json.dumps(conversation_id, ensure_ascii=False)}",
+            f"created_at: {json.dumps(record['created_at'], ensure_ascii=False)}",
+            f"updated_at: {json.dumps(record['updated_at'], ensure_ascii=False)}",
+            'tags: ["AI静静/对话"]',
+            "---",
+            "",
+            f"# {title}",
+            "",
+        ]
+        role_titles = {"user": "用户", "assistant": "AI静静", "system": "系统"}
+        for message in record["messages"]:
+            role = role_titles.get(str(message["role"]), str(message["role"]))
+            lines.extend(
+                [
+                    f"## {role} · {message['created_at']}",
+                    "",
+                    str(message["content"]).strip(),
+                    "",
+                ]
+            )
+            metadata = message.get("metadata") or {}
+            attachments = metadata.get("image_attachments", []) if isinstance(metadata, dict) else []
+            if isinstance(attachments, list) and attachments:
+                lines.extend(["### 提问图片", ""])
+                for attachment in attachments:
+                    if not isinstance(attachment, dict):
+                        continue
+                    path = str(attachment.get("local_path") or "").strip()
+                    label = str(attachment.get("filename") or "图片").strip() or "图片"
+                    if path:
+                        lines.append(f"- [{label}]({path})")
+                lines.append("")
+            answer = answers_by_message.get(str(message["message_id"]))
+            if not answer:
+                continue
+            citations = answer.get("citations") or []
+            if citations:
+                lines.extend(["### 证据来源", ""])
+                for citation in citations:
+                    location = []
+                    if citation.get("page_number") is not None:
+                        location.append(f"P{citation['page_number']}")
+                    if citation.get("slide_number") is not None:
+                        location.append(f"S{citation['slide_number']}")
+                    if citation.get("timestamp_start") is not None:
+                        location.append(f"{citation['timestamp_start']:g}s")
+                    target = citation.get("original_uri") or citation.get("local_path") or "本地知识库"
+                    suffix = f"（{' / '.join(location)}）" if location else ""
+                    lines.append(
+                        f"- [{citation['citation_id']}] {citation['title']}{suffix} — {target}"
+                    )
+                lines.append("")
+            feedback = answer.get("feedback")
+            if isinstance(feedback, dict):
+                label = "有帮助" if feedback.get("rating") == "up" else "需要改进"
+                reason = str(feedback.get("reason") or "").strip()
+                lines.extend(["### 回答反馈", "", f"- 评价：{label}"])
+                if reason:
+                    lines.append(f"- 原因：{reason}")
+                lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def save_answer_feedback(
+        self, answer_id: str, rating: str, reason: str = ""
+    ) -> dict[str, Any]:
+        normalized = str(rating or "").strip().casefold()
+        if normalized not in {"up", "down"}:
+            raise ValueError("反馈只能是 up 或 down")
+        clean_reason = str(reason or "").strip()
+        if len(clean_reason) > 2000:
+            raise ValueError("反馈原因不能超过 2000 个字符")
+        if self.database.connection.execute(
+            "SELECT 1 FROM answers WHERE id=?", (answer_id,)
+        ).fetchone() is None:
+            raise ValueError(f"answer does not exist: {answer_id}")
+        now = utcnow_iso()
+        with self.database.connection:
+            self.database.connection.execute(
+                """INSERT INTO answer_feedback(answer_id, rating, reason, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(answer_id) DO UPDATE SET
+                       rating=excluded.rating, reason=excluded.reason,
+                       updated_at=excluded.updated_at""",
+                (answer_id, normalized, clean_reason, now, now),
+            )
+        row = self.database.connection.execute(
+            "SELECT * FROM answer_feedback WHERE answer_id=?", (answer_id,)
+        ).fetchone()
+        return dict(row)
+
     def answer_record(self, answer_id: str) -> dict[str, Any]:
         answer = self.database.connection.execute(
             """SELECT a.*, q.content AS question
@@ -284,6 +474,10 @@ class ConversationRepository:
                ORDER BY CAST(SUBSTR(citation_id, 2) AS INTEGER)""",
             (answer_id,),
         ).fetchall()
+        feedback = self.database.connection.execute(
+            "SELECT rating, reason, created_at, updated_at FROM answer_feedback WHERE answer_id=?",
+            (answer_id,),
+        ).fetchone()
         return {
             "answer_id": answer["id"],
             "conversation_id": answer["conversation_id"],
@@ -297,6 +491,7 @@ class ConversationRepository:
             "retrieval_info": json.loads(answer["retrieval_info_json"]),
             "confidence": answer["confidence"],
             "created_at": answer["created_at"],
+            "feedback": dict(feedback) if feedback is not None else None,
             "evidence": [
                 {
                     "evidence_id": row["evidence_id"],

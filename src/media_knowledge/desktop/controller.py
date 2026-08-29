@@ -3,11 +3,9 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-import sqlite3
 import shutil
 import tempfile
 import uuid
-import zipfile
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -29,10 +27,12 @@ from ..qa.engine import KnowledgeQAEngine
 from ..qa.models import ImageAttachment, KnowledgeAnswer
 from ..retrieval import KnowledgeRetriever
 from ..runtime import build_answer_provider, build_embedding_provider, build_rerank_provider
-from ..storage import KnowledgeDatabase
+from ..storage import ConversationRepository, IngestionJobRepository, KnowledgeDatabase
 from ..sync import ObsidianMarkdownSync, scan_folder
 from ..indexing import IndexingService
-from .update import check_for_update
+from .backup import create_backup as create_product_backup
+from .backup import restore_backup as restore_product_backup
+from .update import check_for_update, download_verified_update
 
 
 DEFAULT_PROVIDERS = {
@@ -234,6 +234,10 @@ class DesktopController:
         if self.settings.default_model in LEGACY_DEFAULT_ANSWER_MODELS:
             self.settings.default_model = DEFAULT_ANSWER_MODEL
             self.settings.save(self.paths.settings)
+        with KnowledgeDatabase(self.paths.database) as database:
+            self.recovered_ingestion_jobs = IngestionJobRepository(
+                database
+            ).recover_interrupted_jobs()
 
     def reload(self) -> None:
         self.settings = DesktopSettings.load(self.paths.settings)
@@ -314,10 +318,43 @@ class DesktopController:
         *,
         progress: Callable[[ProgressEvent], None] | None = None,
         cancellation: CancellationToken | None = None,
+        job_id: str | None = None,
     ) -> IngestionSummary:
-        values = list(items)
-        service = IngestionService(self.paths, self.config(), self.settings)
-        result = service.ingest(values, progress=progress, cancellation=cancellation)
+        values = [str(item).strip() for item in items if str(item).strip()]
+        if not values:
+            raise ValueError("请至少选择一个文件或网页地址")
+        with KnowledgeDatabase(self.paths.database) as database:
+            jobs = IngestionJobRepository(database)
+            if job_id is None:
+                active_job_id = str(jobs.create_job(values)["id"])
+            else:
+                active_job_id = job_id
+                jobs.job_record(active_job_id)
+            jobs.begin_job(active_job_id)
+
+        def tracked_progress(event: ProgressEvent) -> None:
+            with KnowledgeDatabase(self.paths.database) as database:
+                IngestionJobRepository(database).record_progress(
+                    active_job_id, event.item, event.stage, event.percent, event.message
+                )
+            if progress:
+                progress(event)
+
+        try:
+            service = IngestionService(self.paths, self.config(), self.settings)
+            result = service.ingest(
+                values, progress=tracked_progress, cancellation=cancellation
+            )
+        except Exception as exc:
+            with KnowledgeDatabase(self.paths.database) as database:
+                IngestionJobRepository(database).fail_job(active_job_id, str(exc))
+            raise
+        result.job_id = active_job_id
+        with KnowledgeDatabase(self.paths.database) as database:
+            jobs = IngestionJobRepository(database)
+            for item in result.results:
+                jobs.record_result(active_job_id, item.item, item.to_dict())
+            jobs.finalize_job(active_job_id)
         recent = [str(item) for item in values]
         self.settings.recent_imports = list(dict.fromkeys([*recent, *self.settings.recent_imports]))[:20]
         self.settings.save(self.paths.settings)
@@ -361,6 +398,7 @@ class DesktopController:
         tags: list[str] | None = None,
         document_ids: list[str] | None = None,
         progress: Callable[[str, str], None] | None = None,
+        delta_callback: Callable[[str], None] | None = None,
         image_attachments: list[ImageAttachment] | None = None,
     ) -> KnowledgeAnswer:
         config = self.config()
@@ -402,8 +440,142 @@ class DesktopController:
                 document_ids=document_ids,
                 response_language=self.settings.answer_language,
                 progress_callback=progress,
+                delta_callback=delta_callback,
                 image_attachments=image_attachments,
             )
+
+    def conversations(
+        self, query: str = "", limit: int = 200, offset: int = 0
+    ) -> list[dict[str, object]]:
+        with KnowledgeDatabase(self.paths.database) as database:
+            return ConversationRepository(database).list_conversations(
+                query, limit=limit, offset=offset
+            )
+
+    def conversation_record(self, conversation_id: str) -> dict[str, object]:
+        with KnowledgeDatabase(self.paths.database) as database:
+            return ConversationRepository(database).conversation_record(conversation_id)
+
+    def rename_conversation(self, conversation_id: str, title: str) -> bool:
+        with KnowledgeDatabase(self.paths.database) as database:
+            return ConversationRepository(database).rename_conversation(conversation_id, title)
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        with KnowledgeDatabase(self.paths.database) as database:
+            return ConversationRepository(database).delete_conversation(conversation_id)
+
+    def export_conversation(
+        self,
+        conversation_id: str,
+        destination: str | Path | None = None,
+    ) -> Path:
+        with KnowledgeDatabase(self.paths.database) as database:
+            repository = ConversationRepository(database)
+            record = repository.conversation_record(conversation_id)
+            markdown = repository.conversation_markdown(conversation_id)
+        title = str(record.get("title") or "新对话")
+        safe_title = "".join(
+            "-" if char in '/:*?\"<>|\\' else char for char in title
+        ).strip(" .-")[:80] or "新对话"
+        date = str(record.get("created_at") or "")[:10] or datetime.now().astimezone().strftime("%Y-%m-%d")
+        filename = f"{date}--{safe_title}--{conversation_id[-8:]}.md"
+        if destination is None:
+            target = self.paths.notes / "对话记录" / filename
+        else:
+            requested = Path(destination).expanduser()
+            target = requested / filename if requested.suffix.casefold() != ".md" else requested
+        target = target.resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(markdown)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_name, target)
+        except Exception:
+            Path(temporary_name).unlink(missing_ok=True)
+            raise
+        return target
+
+    def save_answer_feedback(
+        self, answer_id: str, rating: str, comment: str = ""
+    ) -> dict[str, object]:
+        with KnowledgeDatabase(self.paths.database) as database:
+            return ConversationRepository(database).save_answer_feedback(
+                answer_id, rating, comment
+            )
+
+    def save_partial_answer(self, conversation_id: str, markdown: str) -> str:
+        content = str(markdown or "").strip()
+        if not content:
+            raise ValueError("没有可保存的部分回答")
+        with KnowledgeDatabase(self.paths.database) as database:
+            message = ConversationRepository(database).add_message(
+                conversation_id,
+                "assistant",
+                content,
+                {"partial": True, "stopped": True},
+            )
+        return message.message_id
+
+    def create_ingestion_job(
+        self, items: Iterable[str | Path], *, metadata: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        values = [str(item).strip() for item in items if str(item).strip()]
+        with KnowledgeDatabase(self.paths.database) as database:
+            return IngestionJobRepository(database).create_job(values, metadata=metadata)
+
+    def ingestion_jobs(
+        self,
+        limit: int = 200,
+        *,
+        statuses: Iterable[str] | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, object]]:
+        with KnowledgeDatabase(self.paths.database) as database:
+            return IngestionJobRepository(database).list_jobs(
+                statuses=statuses, limit=limit, offset=offset
+            )
+
+    def ingestion_job(self, job_id: str) -> dict[str, object]:
+        with KnowledgeDatabase(self.paths.database) as database:
+            return IngestionJobRepository(database).job_record(job_id)
+
+    def resume_ingestion_job(
+        self,
+        job_id: str,
+        *,
+        progress: Callable[[ProgressEvent], None] | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> IngestionSummary:
+        with KnowledgeDatabase(self.paths.database) as database:
+            sources = IngestionJobRepository(database).pending_sources(job_id)
+        if not sources:
+            raise ValueError("该任务没有可继续处理的资料")
+        return self.ingest(
+            sources, progress=progress, cancellation=cancellation, job_id=job_id
+        )
+
+    def retry_ingestion_job(
+        self,
+        job_id: str,
+        *,
+        progress: Callable[[ProgressEvent], None] | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> IngestionSummary:
+        with KnowledgeDatabase(self.paths.database) as database:
+            jobs = IngestionJobRepository(database)
+            jobs.reset_failed_items(job_id)
+        return self.resume_ingestion_job(
+            job_id, progress=progress, cancellation=cancellation
+        )
+
+    def cancel_ingestion_job(self, job_id: str) -> bool:
+        with KnowledgeDatabase(self.paths.database) as database:
+            return IngestionJobRepository(database).cancel_job(job_id)
 
     def rebuild_search_index(self) -> dict[str, int]:
         config = self.config()
@@ -647,90 +819,12 @@ class DesktopController:
         return sorted(values, key=lambda item: str(item.get("updated_at", "")), reverse=True)
 
     def create_backup(self) -> Path:
-        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-        target = self.paths.backups / f"AI静静备份-{stamp}.aijjbackup"
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".backup-", suffix=".tmp", dir=self.paths.backups
-        )
-        os.close(descriptor)
-        temporary = Path(temporary_name)
-        db_copy = self.paths.backups / f".knowledge-{stamp}.db"
-        try:
-            source = sqlite3.connect(self.paths.database)
-            destination = sqlite3.connect(db_copy)
-            try:
-                source.backup(destination)
-            finally:
-                destination.close()
-                source.close()
-            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.write(db_copy, "knowledge.db")
-                if self.paths.settings.is_file():
-                    archive.write(self.paths.settings, "settings.json")
-                manifest = {
-                    "format": "ai-jingjing-backup-v1",
-                    "created_at": utcnow_iso(),
-                    "product": PRODUCT_NAME,
-                    "includes_credentials": False,
-                }
-                archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-                for base, prefix in ((self.paths.notes, "notes"), (self.paths.archive, "archive")):
-                    for file in base.rglob("*"):
-                        if file.is_file():
-                            archive.write(file, f"{prefix}/{file.relative_to(base).as_posix()}")
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
-            db_copy.unlink(missing_ok=True)
-        return target
+        return create_product_backup(self.paths)
 
     def restore_backup(self, backup: str | Path) -> dict[str, object]:
-        source = Path(backup).expanduser().resolve()
-        if not source.is_file():
-            raise ValueError("备份文件不存在")
-        safety = self.create_backup()
-        with zipfile.ZipFile(source) as archive:
-            names = set(archive.namelist())
-            if "manifest.json" not in names or "knowledge.db" not in names:
-                raise ValueError("不是有效的 AI静静备份")
-            manifest = json.loads(archive.read("manifest.json"))
-            if manifest.get("format") != "ai-jingjing-backup-v1":
-                raise ValueError("不支持的备份版本")
-            for name in names:
-                path = Path(name)
-                if path.is_absolute() or ".." in path.parts:
-                    raise ValueError("备份包含不安全路径")
-            descriptor, temp_db_name = tempfile.mkstemp(prefix=".restore-", suffix=".db", dir=self.paths.root)
-            os.close(descriptor)
-            temp_db = Path(temp_db_name)
-            try:
-                temp_db.write_bytes(archive.read("knowledge.db"))
-                check = sqlite3.connect(temp_db)
-                try:
-                    if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                        raise ValueError("备份数据库完整性检查失败")
-                finally:
-                    check.close()
-                restore_source = sqlite3.connect(temp_db)
-                restore_destination = sqlite3.connect(self.paths.database)
-                try:
-                    restore_source.backup(restore_destination)
-                finally:
-                    restore_destination.close()
-                    restore_source.close()
-                if "settings.json" in names:
-                    self.paths.settings.write_bytes(archive.read("settings.json"))
-                for prefix, base in (("notes/", self.paths.notes), ("archive/", self.paths.archive)):
-                    for name in names:
-                        if not name.startswith(prefix) or name.endswith("/"):
-                            continue
-                        target = base / Path(name).relative_to(prefix)
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(archive.read(name))
-            finally:
-                temp_db.unlink(missing_ok=True)
+        report = restore_product_backup(self.paths, backup)
         self.reload()
-        return {"status": "complete", "safety_backup": str(safety), "restored": str(source)}
+        return report
 
     def repair_database(self) -> dict[str, object]:
         with KnowledgeDatabase(self.paths.database) as database:
@@ -749,6 +843,19 @@ class DesktopController:
         return check_for_update(
             __version__, self.settings.update_manifest_url
         ).to_dict()
+
+    def download_update(
+        self,
+        download_url: str,
+        sha256: str,
+        destination_dir: str | Path | None = None,
+    ) -> Path:
+        destination = (
+            Path(destination_dir).expanduser().resolve()
+            if destination_dir is not None
+            else self.paths.cache / "updates"
+        )
+        return download_verified_update(download_url, sha256, destination)
 
     def save_answer_note(self, answer: KnowledgeAnswer, question: str) -> Path:
         folder = self.paths.notes / "AI回答"

@@ -159,6 +159,36 @@ class AnswerModelTests(unittest.TestCase):
             self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
             self.assertEqual(result.markdown, "图片中是一个流程图。")
 
+    def test_openai_compatible_provider_streams_visible_deltas(self) -> None:
+        provider = OpenAICompatibleAnswerProvider(
+            "https://provider.example/v1", "test-key", "deepseek-v4-flash"
+        )
+        events = iter(
+            [
+                {"choices": [{"delta": {"content": "第一段"}}]},
+                {"choices": [{"delta": {"content": "，第二段。"}}]},
+                {
+                    "choices": [],
+                    "usage": {"prompt_tokens": 9, "completion_tokens": 6, "total_tokens": 15},
+                },
+            ]
+        )
+        deltas: list[str] = []
+        with mock.patch.object(provider, "_stream_events", return_value=events) as stream:
+            result = provider.generate(
+                AnswerRequest(
+                    question="请回答",
+                    system_prompt="system",
+                    user_prompt="user",
+                    evidence=[],
+                    delta_callback=deltas.append,
+                )
+            )
+        self.assertTrue(stream.call_args.args[0]["stream"])
+        self.assertEqual(deltas, ["第一段", "，第二段。"])
+        self.assertEqual(result.markdown, "第一段，第二段。")
+        self.assertEqual(result.token_usage.total_tokens, 15)
+
 
 if __name__ == "__main__":
     unittest.main()

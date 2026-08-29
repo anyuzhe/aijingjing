@@ -56,6 +56,17 @@ def _parser() -> argparse.ArgumentParser:
     ask.add_argument("--top-k", type=int, default=10)
     ask.add_argument("--hide-evidence", action="store_true")
 
+    evaluate = subparsers.add_parser(
+        "eval", help="Evaluate retrieval and citations against a local golden JSON dataset"
+    )
+    evaluate.add_argument("dataset", help="Path to the golden evaluation JSON file")
+    evaluate.add_argument("--top-k", type=int, default=10)
+    evaluate.add_argument(
+        "--retrieval-only",
+        action="store_true",
+        help="Skip deterministic local answer/citation evaluation",
+    )
+
     conversation = subparsers.add_parser("conversation-show", help="Show persisted conversation and summary")
     conversation.add_argument("conversation_id")
 
@@ -195,6 +206,22 @@ def run(argv: Sequence[str] | None = None) -> int:
             if args.hide_evidence:
                 payload.pop("evidence", None)
             _dump(payload)
+            return 0
+        if args.command == "eval":
+            from .evaluation import GoldenEvaluator, load_golden_dataset
+
+            retriever = KnowledgeRetriever(
+                database,
+                embedding,
+                rerank_provider=build_rerank_provider(config),
+            )
+            engine = None if args.retrieval_only else KnowledgeQAEngine(database, retriever)
+            report = GoldenEvaluator(retriever, qa_engine=engine).evaluate(
+                load_golden_dataset(args.dataset),
+                top_k=args.top_k,
+                evaluate_citations=not args.retrieval_only,
+            )
+            _dump(report)
             return 0
         if args.command == "conversation-show":
             _dump(ConversationRepository(database).conversation_record(args.conversation_id))

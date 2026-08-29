@@ -12,7 +12,9 @@ from .analyzer import QuestionAnalyzer
 from .evidence import EvidenceBuilder
 from .models import AnswerRequest, AnswerResponse, ImageAttachment, KnowledgeAnswer, TokenUsage, new_id
 from .prompt import build_answer_prompt
+from .quality import evaluate_evidence_quality
 from .rewrite import ContextualQueryRewriter, QueryRewriter
+from .strategy import AdaptiveRetrievalPlanner
 
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ class KnowledgeQAEngine:
         analyzer: QuestionAnalyzer | None = None,
         query_rewriter: QueryRewriter | None = None,
         evidence_builder: EvidenceBuilder | None = None,
+        retrieval_planner: AdaptiveRetrievalPlanner | None = None,
         recent_context_limit: int = 6,
     ):
         self.database = database
@@ -38,6 +41,7 @@ class KnowledgeQAEngine:
         self.analyzer = analyzer or QuestionAnalyzer()
         self.query_rewriter = query_rewriter or ContextualQueryRewriter()
         self.evidence_builder = evidence_builder or EvidenceBuilder()
+        self.retrieval_planner = retrieval_planner or AdaptiveRetrievalPlanner(database)
         self.recent_context_limit = recent_context_limit
         self.conversations = ConversationRepository(database)
         self.citation_validator = CitationValidator(self.conversations)
@@ -61,6 +65,7 @@ class KnowledgeQAEngine:
         top_k: int = 10,
         response_language: str | None = None,
         progress_callback: Callable[[str, str], None] | None = None,
+        delta_callback: Callable[[str], None] | None = None,
         image_attachments: list[ImageAttachment] | None = None,
     ) -> KnowledgeAnswer:
         pipeline_started = perf_counter()
@@ -101,7 +106,7 @@ class KnowledgeQAEngine:
         )
 
         retrieval_started = perf_counter()
-        knowledge_results = self.retriever.search_knowledge(
+        focused_results = self.retriever.search_knowledge(
             rewritten_query,
             collections=collections,
             tags=tags,
@@ -111,6 +116,18 @@ class KnowledgeQAEngine:
             date_range=date_range,
             top_k=top_k,
         )
+        retrieval_selection = self.retrieval_planner.select(
+            analysis,
+            focused_results,
+            document_ids=document_ids,
+            top_k=top_k,
+            collections=collections,
+            tags=tags,
+            media_types=media_types,
+            folders=folders,
+            date_range=date_range,
+        )
+        knowledge_results = retrieval_selection.results
         retrieval_ms = (perf_counter() - retrieval_started) * 1000
         web_requested = normalized_mode == "knowledge+web"
         web_started = perf_counter()
@@ -125,9 +142,24 @@ class KnowledgeQAEngine:
         if progress_callback:
             if evidence:
                 source_count = self.evidence_builder.source_count(evidence)
+                if retrieval_selection.strategy == "full_context":
+                    message = (
+                        f"已在上下文预算内载入该资料的全部 {len(evidence)} 个片段，"
+                        "正在生成中文回答"
+                    )
+                elif retrieval_selection.strategy == "hierarchical":
+                    message = (
+                        f"资料较长，已按章节与位置选出 {len(evidence)} 个代表片段，"
+                        "正在生成中文回答"
+                    )
+                else:
+                    message = (
+                        f"已按相关性选出 {len(evidence)} 个候选片段，来自 "
+                        f"{source_count} 份资料，正在生成中文回答"
+                    )
                 progress_callback(
                     "answering",
-                    f"已按相关性选出 {len(evidence)} 个候选片段，来自 {source_count} 份资料，正在生成中文回答",
+                    message,
                 )
             else:
                 progress_callback("answering", "没有找到达到相关性要求的知识片段，正在整理结果")
@@ -140,6 +172,7 @@ class KnowledgeQAEngine:
                 evidence,
                 response_language=response_language,
                 image_attachments=active_images,
+                delta_callback=delta_callback,
             )
             validation = self.citation_validator.validate(response.markdown, evidence)
             citations = self.citation_validator.citations(validation, evidence)
@@ -151,6 +184,8 @@ class KnowledgeQAEngine:
                 token_usage=TokenUsage(),
             )
             citations = []
+            if delta_callback:
+                delta_callback(response.markdown)
         answer_ms = (perf_counter() - answer_started) * 1000
 
         retrieval_info = {
@@ -158,6 +193,9 @@ class KnowledgeQAEngine:
             "rewritten_query": rewritten_query,
             "question_analysis": analysis.to_dict(),
             "knowledge_result_count": len(knowledge_results),
+            "focused_result_count": len(focused_results),
+            "candidate_count": len(focused_results),
+            "retrieved_count": len(knowledge_results),
             "web_result_count": len(web_results),
             "evidence_count": len(evidence),
             "requested_mode": normalized_mode,
@@ -167,6 +205,10 @@ class KnowledgeQAEngine:
             "response_language": response_language,
             "image_count": len(active_images),
             "new_image_count": len(supplied_images),
+            "retrieval_strategy": retrieval_selection.strategy,
+            "retrieval_strategy_details": retrieval_selection.details,
+            "untrusted_evidence_boundary": True,
+            "instruction_risk_evidence_count": sum(item.instruction_risk for item in evidence),
             "filters": {
                 "collections": collections or [],
                 "tags": tags or [],
@@ -194,9 +236,18 @@ class KnowledgeQAEngine:
                 "answer_and_citation_validation": round(answer_ms, 3),
             },
         }
-        confidence = self._confidence(
-            len(evidence), len(citations), response.provider, image_count=len(active_images)
+        evidence_quality = evaluate_evidence_quality(
+            response.markdown,
+            evidence,
+            citations,
+            retrieval_strategy=retrieval_selection.strategy,
+            image_count=len(active_images),
         )
+        retrieval_info["evidence_quality"] = evidence_quality.to_dict()
+        retrieval_info["confidence_semantics"] = (
+            "compatibility alias for citation_coverage; this is not a probability of truth"
+        )
+        confidence = evidence_quality.citation_coverage
         answer = KnowledgeAnswer(
             answer_id=new_id("answer"),
             conversation_id=conversation_id,
@@ -208,6 +259,7 @@ class KnowledgeQAEngine:
             token_usage=response.token_usage,
             retrieval_info=retrieval_info,
             confidence=confidence,
+            evidence_quality=evidence_quality,
         )
         answer.retrieval_info["latency_ms"]["total"] = round(
             (perf_counter() - pipeline_started) * 1000, 3
@@ -231,6 +283,7 @@ class KnowledgeQAEngine:
         *,
         response_language: str | None = None,
         image_attachments: list[ImageAttachment] | None = None,
+        delta_callback: Callable[[str], None] | None = None,
     ) -> AnswerResponse:
         images = list(image_attachments or [])
         system_prompt, user_prompt = build_answer_prompt(
@@ -241,7 +294,15 @@ class KnowledgeQAEngine:
             image_count=len(images),
         )
         response = self.answer_provider.generate(
-            AnswerRequest(question, system_prompt, user_prompt, evidence, response_language, images)
+            AnswerRequest(
+                question=question,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                evidence=evidence,
+                response_language=response_language,
+                image_attachments=images,
+                delta_callback=delta_callback,
+            )
         )
         validation = self.citation_validator.validate(response.markdown, evidence)
         if validation.valid:
@@ -258,7 +319,14 @@ class KnowledgeQAEngine:
             image_count=len(images),
         )
         repaired = self.answer_provider.generate(
-            AnswerRequest(question, repair_system, repair_user, evidence, response_language, images)
+            AnswerRequest(
+                question=question,
+                system_prompt=repair_system,
+                user_prompt=repair_user,
+                evidence=evidence,
+                response_language=response_language,
+                image_attachments=images,
+            )
         )
         repaired.token_usage = TokenUsage(
             input_tokens=response.token_usage.input_tokens + repaired.token_usage.input_tokens,
@@ -268,13 +336,3 @@ class KnowledgeQAEngine:
         if not final_validation.valid:
             raise CitationValidationError(final_validation.errors)
         return repaired
-
-    @staticmethod
-    def _confidence(
-        evidence_count: int, citation_count: int, provider: str, *, image_count: int = 0
-    ) -> float:
-        if evidence_count == 0:
-            return 0.65 if image_count else 0.0
-        coverage = citation_count / evidence_count
-        base = 0.5 if provider == "local-extractive" else 0.55
-        return round(min(0.95, base + 0.25 * coverage + 0.02 * min(evidence_count, 5)), 3)

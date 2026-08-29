@@ -1,9 +1,11 @@
 from .models import Citation, Evidence, KnowledgeAnswer, QuestionAnalysis, TokenUsage
+from .quality import EvidenceQuality
 
 __all__ = [
     "KnowledgeQAEngine",
     "Citation",
     "Evidence",
+    "EvidenceQuality",
     "KnowledgeAnswer",
     "QuestionAnalysis",
     "TokenUsage",

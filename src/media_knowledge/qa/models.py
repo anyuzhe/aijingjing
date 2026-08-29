@@ -4,9 +4,12 @@ import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from ..models import SourceReference, utcnow_iso
+
+if TYPE_CHECKING:
+    from .quality import EvidenceQuality
 
 
 def new_id(prefix: str) -> str:
@@ -47,6 +50,7 @@ class Evidence:
     score: float
     source: SourceReference
     source_kind: str = "knowledge"
+    instruction_risk: bool = False
 
     @property
     def document_id(self) -> str | None:
@@ -79,6 +83,7 @@ class Evidence:
             "title": self.title,
             "score": self.score,
             "source_kind": self.source_kind,
+            "instruction_risk": self.instruction_risk,
             "document_id": self.document_id,
             "chunk_id": self.chunk_id,
             "source": self.source.to_dict(),
@@ -140,6 +145,7 @@ class KnowledgeAnswer:
     token_usage: TokenUsage
     retrieval_info: dict[str, Any]
     confidence: float
+    evidence_quality: "EvidenceQuality | None" = None
     created_at: str = field(default_factory=utcnow_iso)
 
     def to_dict(self) -> dict[str, Any]:
@@ -154,6 +160,9 @@ class KnowledgeAnswer:
             "token_usage": self.token_usage.to_dict(),
             "retrieval_info": self.retrieval_info,
             "confidence": self.confidence,
+            "evidence_quality": (
+                self.evidence_quality.to_dict() if self.evidence_quality is not None else None
+            ),
             "created_at": self.created_at,
         }
 
@@ -245,6 +254,7 @@ class AnswerRequest:
     evidence: list[Evidence]
     response_language: str | None = None
     image_attachments: list[ImageAttachment] = field(default_factory=list)
+    delta_callback: Callable[[str], None] | None = None
 
 
 @dataclass(slots=True)

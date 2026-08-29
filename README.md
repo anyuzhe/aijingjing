@@ -7,12 +7,14 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-68%20passed-2F855A" alt="68 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.0.5-4C8FBF" alt="Version 2.0.5">
+    <img src="https://img.shields.io/badge/Test-95%20passed-2F855A" alt="95 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.1.0-4C8FBF" alt="Version 2.1.0">
   </p>
 </div>
 
 AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统一整理成一套可以搜索、连续提问、查看原始证据并长期维护的本地知识库。
+
+版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 它是一款独立桌面软件：日常使用不需要安装 Codex、Obsidian、Python 或独立 FFmpeg。Obsidian 仅作为可选同步目标；DeepSeek、Kimi 等云模型只在用户主动生成回答、知识提炼或视觉理解时调用。
 
@@ -69,6 +71,9 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 ### 4. 连续对话与可信引用
 
 - 支持同一会话内连续多轮提问；
+- 对话自动持久化，可搜索、重新打开、重命名、删除和导出 Markdown；
+- 云模型回答逐字流式显示，可随时停止并保留已生成内容；
+- 每条回答支持复制、重新生成和“有帮助/需改进”本地反馈；
 - 可在提问框直接粘贴截图、拖入图片或通过按钮一次选择最多 4 张图片；
 - 发送前显示缩略图并可移除；视觉模型会联合理解文字、图片和检索证据；
 - 后续问题可继续指代上一轮图片，无需重复添加；
@@ -77,6 +82,10 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 - 引用 ID、文档 ID 和知识块 ID 会在本地数据库中校验；
 - 点击回答中的引用可打开原文阅读器并定位页码或时间点；
 - 没有足够证据时明确说明，而不是编造答案。
+
+检索上下文会自动选择三种策略：普通问题使用聚焦检索；选中的小文档可使用完整上下文；超长课程或报告使用分层抽样。右侧显示“证据充分 / 部分有据 / 引用有限 / 证据不足”，并可展开查看引用覆盖、证据利用率、来源多样性和具体判断依据。这里展示的是可复核的覆盖指标，不是模型虚构的“正确率”。
+
+所有召回内容都被封装为不可信证据数据。系统会标记疑似提示词注入，并明确禁止执行证据中的命令、角色指令或泄密请求。
 
 回答模型可以选择 DeepSeek、Kimi 或完全离线的本地证据模型。配置 DeepSeek 后默认使用支持文字与图片理解的实验模型 `deepseek-v4-flash-vision-exp`；检索本身不调用大模型，因此日常搜索成本很低。
 
@@ -93,6 +102,8 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 ### 6. 自动同步与知识工坊
 
 - 监听一个或多个文件夹并增量入库；
+- 每批导入及每个文件的阶段、进度、错误和结果都会持久化；
+- 程序异常退出后，未完成任务恢复为“可继续”，失败项可单独重试；
 - 文件变化后只重新解析变化项；
 - 源文件消失时先停用对应知识，不静默删除；
 - 可选从 Obsidian 增量同步，或把 AI静静笔记导出至 Obsidian；
@@ -103,8 +114,9 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 - 知识、索引、对话、答案和引用保存在本机 SQLite；
 - API Key 优先保存在 macOS Keychain 或系统凭据存储；
 - 备份包明确排除 API Key；
-- 支持一键完整备份、恢复前安全快照和数据库完整性修复；
-- 更新清单只接受 HTTPS 地址；
+- V2 完整备份覆盖数据库、设置、笔记、原始归档、页面资源和转写，并为每个文件记录大小与 SHA-256；
+- 恢复前先验证路径、压缩比、大小、哈希、SQLite 和设置，再创建当前数据安全快照并原子恢复；
+- 更新清单和下载重定向只接受 HTTPS；安装包下载完成后必须通过清单中的 SHA-256 才允许打开；
 - 本地文件路径、数据库和个人知识目录均由 `.gitignore` 排除。
 
 ## 支持的输入
@@ -138,12 +150,14 @@ PySide6 桌面界面
         │   └── Conversations / Evidence / Citations
         │
         ├── KnowledgeRetriever
-        │   └── Semantic Vector + BM25 + RRF + Rerank
+        │   ├── Semantic Vector + BM25 + RRF + Rerank
+        │   └── Focused / Full Context / Hierarchical
         │
         └── KnowledgeQAEngine
             ├── 上下文问题重写
             ├── DeepSeek / Kimi / Local Extractive
-            └── 证据构建与引用校验
+            ├── 不可信证据边界与提示注入防护
+            └── 证据构建、引用校验与质量解释
 ```
 
 ## 快速开始
@@ -193,6 +207,9 @@ knowledge ask "FDE 是什么？"
 knowledge index-status
 knowledge doctor
 knowledge reindex
+
+# 使用本地黄金集评估检索与引用质量
+knowledge eval docs/golden-evaluation.example.json --top-k 10
 ```
 
 搜索和问答支持 `--collection`、`--tag`、`--media-type`、`--folder` 和 `--document-id` 等范围过滤参数。
@@ -238,7 +255,9 @@ pip install pytest
 pytest -q
 ```
 
-当前版本包含 68 项自动化测试，覆盖分块、索引迁移、模型迁移、DeepSeek Vision 默认选择、图片粘贴与多模态请求、图片后续追问、相关性排序与误召回过滤、连续对话、引用、微信文章抓取与验证页拦截、质检、同步、备份恢复和桌面产品行为。
+当前版本包含 95 项自动化测试，覆盖分块、数据库迁移、模型选择、真实流式输出、图片粘贴与多模态请求、图片后续追问、自适应上下文、证据质量、提示注入防护、连续对话历史、回答反馈、持久化导入任务、引用、微信文章抓取与验证页拦截、V1/V2 备份恢复、安全更新和桌面产品行为。
+
+仓库还提供本地黄金集评测框架，可计算 Hit Rate@K、MRR、Citation Precision 和 Citation Coverage。先把示例中的文档 ID、知识块 ID 换成自己的入库记录，再运行 `knowledge eval`；加 `--retrieval-only` 可只评估检索。
 
 ## 构建桌面应用
 
@@ -255,6 +274,8 @@ Windows PowerShell：
 ```
 
 正式对外发布 macOS 应用时，还需要 Apple Developer ID。仓库中的 `packaging/sign_and_notarize.sh` 支持签名与公证流程。
+
+GitHub Actions 会在 Linux、macOS 和 Windows 上运行测试，并生成 macOS/Windows 未签名构建产物。公开发行前仍需按 `packaging/RELEASE_SECURITY.md` 完成平台签名、公证、SHA-256 清单和发布验证。
 
 ## 项目结构
 

@@ -18,7 +18,9 @@ class QuestionAnalyzer:
         lowered = normalized.casefold()
         if any(token in normalized for token in ("比较", "区别", "异同", "对比")) or "compare" in lowered:
             task_type = "compare"
-        elif any(token in normalized for token in ("综合", "总结", "到底", "归纳")) or "synthesize" in lowered:
+        elif any(
+            token in normalized for token in ("综合", "总结", "概述", "概览", "摘要", "归纳")
+        ) or any(token in lowered for token in ("synthesize", "summarize", "summary", "overview")):
             task_type = "synthesis"
         elif any(token in normalized for token in ("为什么", "如何", "怎么")) or any(
             token in lowered for token in ("why", "how")

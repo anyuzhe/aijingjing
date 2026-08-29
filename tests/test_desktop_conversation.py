@@ -11,6 +11,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QImage
     from media_knowledge.desktop.app import SettingsDialog, create_application
     from media_knowledge.desktop.controller import DesktopController, ProviderConfigStore
@@ -21,6 +22,24 @@ except (ImportError, RuntimeError):  # pragma: no cover - desktop extra is optio
 
 @unittest.skipIf(create_application is None, "PySide6 desktop components are unavailable")
 class DesktopConversationTests(unittest.TestCase):
+    def test_persisted_import_job_is_visible_and_resumable_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            controller = DesktopController(data, migrate_legacy=False)
+            job = controller.create_ingestion_job(["one.md", "two.md"])
+            application, window = create_application(data)
+            try:
+                window.refresh_ingestion_jobs()
+                self.assertEqual(window.task_list.count(), 1)
+                item = window.task_list.item(0)
+                self.assertEqual(item.data(Qt.UserRole), job["id"])
+                self.assertEqual(item.data(Qt.UserRole + 1), "queued")
+                self.assertTrue(window.retry_button.isEnabled())
+                self.assertEqual(window.retry_button.text(), "继续任务")
+            finally:
+                window.close()
+                application.processEvents()
+
     def test_pasting_clipboard_image_adds_a_sendable_thumbnail(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             controller = DesktopController(Path(temporary) / "data", migrate_legacy=False)
@@ -112,6 +131,24 @@ class DesktopConversationTests(unittest.TestCase):
                 self.assertEqual(len(set(answer_ids)), 2)
                 self.assertIn("实际引用", window.answer_status.text())
                 self.assertIn("份资料", window.answer_status.text())
+                window.refresh_conversations()
+                self.assertGreaterEqual(window.history_list.count(), 1)
+                window.new_chat()
+                self.assertIsNone(window.conversation_id)
+                for index in range(window.history_list.count()):
+                    item = window.history_list.item(index)
+                    if item.data(Qt.UserRole) == conversation_id:
+                        window.history_list.setCurrentItem(item)
+                        break
+                window.open_selected_conversation()
+                self.assertEqual(window.conversation_id, conversation_id)
+                self.assertEqual(len(window._chat_entries), 4)
+                self.assertEqual(window.last_answer_id, answer_ids[-1])
+                window.copy_last_answer()
+                self.assertEqual(application.clipboard().text(), window.last_answer_markdown)
+                window.save_answer_feedback("up")
+                restored = controller.conversation_record(conversation_id)
+                self.assertEqual(restored["answers"][-1]["feedback"]["rating"], "up")
             finally:
                 window.close()
                 application.processEvents()

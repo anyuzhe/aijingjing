@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "name": "AI静静示例评测集",
+  "cases": [
+    {
+      "id": "fast-livo2-sync",
+      "query": "FAST-LIVO2 是否要求硬件时间同步？",
+      "relevant_document_ids": ["替换为入库后的-document-id"],
+      "relevant_chunk_ids": ["替换为支持该结论的-chunk-id"],
+      "citation_targets": [
+        {
+          "target_id": "hardware-sync-requirement",
+          "chunk_ids": ["替换为支持该结论的-chunk-id"]
+        }
+      ],
+      "filters": {
+        "collections": ["SLAM"]
+      }
+    }
+  ]
+}

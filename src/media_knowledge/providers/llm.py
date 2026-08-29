@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Callable, Iterator
 
 from ..codex_cli import codex_http_transport_args
 from ..models import estimate_tokens
@@ -87,6 +88,8 @@ class ExtractiveGroundedProvider(AnswerProvider):
             input_tokens=estimate_tokens(request.user_prompt) + estimate_tokens(request.system_prompt),
             output_tokens=estimate_tokens(markdown),
         )
+        if request.delta_callback:
+            request.delta_callback(markdown)
         return AnswerResponse(markdown, self.model, self.name, usage)
 
 
@@ -185,8 +188,148 @@ class OpenAICompatibleAnswerProvider(AnswerProvider):
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if request.delta_callback:
+            payload["stream"] = True
+            return self._stream_answer(payload, request.delta_callback)
         body = self.request_json(payload)
         return self._answer_response(body)
+
+    def _stream_answer(
+        self,
+        payload: dict[str, object],
+        delta_callback: Callable[[str], None],
+    ) -> AnswerResponse:
+        """Consume an OpenAI-compatible SSE response and forward visible text deltas."""
+        chunks: list[str] = []
+        usage: dict[str, object] = {}
+        for event in self._stream_events(payload):
+            raw_error = event.get("error")
+            if isinstance(raw_error, dict):
+                detail = str(raw_error.get("message") or raw_error.get("code") or "未知错误")
+                raise RuntimeError(f"answer provider streaming failed: {detail[:300]}")
+            raw_usage = event.get("usage")
+            if isinstance(raw_usage, dict):
+                usage = raw_usage
+            choices = event.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                continue
+            delta = choices[0].get("delta")
+            content = delta.get("content") if isinstance(delta, dict) else None
+            if isinstance(content, list):
+                content = "".join(
+                    str(part.get("text") or part.get("content") or "")
+                    for part in content if isinstance(part, dict)
+                )
+            if isinstance(content, str) and content:
+                chunks.append(content)
+                delta_callback(content)
+        markdown = "".join(chunks).strip()
+        if not markdown:
+            raise RuntimeError("answer provider returned empty streaming content")
+        token_usage = TokenUsage(
+            input_tokens=int(usage.get("prompt_tokens", 0)),
+            output_tokens=int(usage.get("completion_tokens", 0)),
+            total_tokens=int(usage.get("total_tokens", 0)),
+        )
+        if not token_usage.total_tokens:
+            token_usage = TokenUsage(output_tokens=estimate_tokens(markdown))
+        return AnswerResponse(markdown, self.model, self.name, token_usage)
+
+    def _stream_events(self, payload: dict[str, object]) -> Iterator[dict[str, object]]:
+        http_request = urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+            method="POST",
+        )
+        if self._prefer_curl:
+            yield from self._stream_events_with_curl(payload)
+            return
+        try:
+            with urllib.request.urlopen(http_request, timeout=self.timeout) as response:
+                for raw_line in response:
+                    event = self._parse_sse_line(raw_line.decode("utf-8", errors="replace"))
+                    if event is not None:
+                        yield event
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            raise RuntimeError(
+                f"answer provider request failed: HTTP {exc.code}{': ' + detail if detail else ''}"
+            ) from exc
+        except urllib.error.URLError:
+            self._prefer_curl = True
+            yield from self._stream_events_with_curl(payload)
+
+    def _stream_events_with_curl(
+        self, payload: dict[str, object]
+    ) -> Iterator[dict[str, object]]:
+        curl = shutil.which("curl")
+        if not curl:
+            raise RuntimeError("answer provider request failed: curl is unavailable")
+        header_descriptor, header_name = tempfile.mkstemp(prefix="knowledge-headers-", suffix=".txt")
+        payload_descriptor, payload_name = tempfile.mkstemp(prefix="knowledge-payload-", suffix=".json")
+        header_path = Path(header_name)
+        payload_path = Path(payload_name)
+        process: subprocess.Popen[str] | None = None
+        try:
+            os.fchmod(header_descriptor, 0o600)
+            os.fchmod(payload_descriptor, 0o600)
+            with os.fdopen(header_descriptor, "w", encoding="utf-8") as header_file:
+                header_file.write(
+                    f"Authorization: Bearer {self.api_key}\n"
+                    "Content-Type: application/json\nAccept: text/event-stream\n"
+                )
+            with os.fdopen(payload_descriptor, "w", encoding="utf-8") as payload_file:
+                json.dump(payload, payload_file, ensure_ascii=False)
+            process = subprocess.Popen(
+                [
+                    curl, "--silent", "--show-error", "--no-buffer", "--fail-with-body",
+                    "--max-time", str(max(1, int(self.timeout))), "--header", f"@{header_path}",
+                    "--data-binary", f"@{payload_path}", self.endpoint,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            if process.stdout is None:
+                raise RuntimeError("answer provider streaming output is unavailable")
+            for line in process.stdout:
+                event = self._parse_sse_line(line)
+                if event is not None:
+                    yield event
+            return_code = process.wait(timeout=5)
+            if return_code != 0:
+                detail = process.stderr.read().strip() if process.stderr else "curl request failed"
+                raise RuntimeError(f"answer provider request failed: {detail[-300:]}")
+        except subprocess.TimeoutExpired as exc:
+            if process:
+                process.kill()
+            raise RuntimeError("answer provider request timed out") from exc
+        finally:
+            if process and process.poll() is None:
+                process.terminate()
+            header_path.unlink(missing_ok=True)
+            payload_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _parse_sse_line(line: str) -> dict[str, object] | None:
+        value = line.strip()
+        if not value or value.startswith(":"):
+            return None
+        if value.startswith("data:"):
+            value = value[5:].strip()
+        if value == "[DONE]":
+            return None
+        try:
+            event = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return event if isinstance(event, dict) else None
 
     @staticmethod
     def _image_content(attachment: ImageAttachment) -> dict[str, object]:

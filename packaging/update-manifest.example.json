@@ -1,6 +1,6 @@
 {
-  "version": "2.0.5",
-  "download_url": "https://downloads.example.com/AI-Jingjing-2.0.5.dmg",
-  "sha256": "replace-with-release-sha256",
-  "notes": "AI静静 2.0：中文语义检索、质检中心、知识空间、原文阅读、自动同步、知识工坊和安全备份。"
+  "version": "2.1.0",
+  "download_url": "https://downloads.example.com/AI-Jingjing-2.1.0.dmg",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "notes": "AI静静 2.1：可恢复对话与导入任务、真实流式回答、自适应 RAG、可解释证据质量、完整备份和安全更新。"
 }

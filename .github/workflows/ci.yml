@@ -1,0 +1,90 @@
+name: Test and build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests · ${{ matrix.os }} · Python ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+        python: ["3.11"]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install test runtime
+        run: python -m pip install --upgrade pip setuptools wheel ".[desktop]"
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+  package:
+    name: Unsigned package · ${{ matrix.os }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            artifact: AI-Jingjing-macOS-unsigned
+          - os: windows-latest
+            artifact: AI-Jingjing-Windows-unsigned
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install packaging runtime
+        run: python -m pip install --upgrade pip setuptools wheel ".[full]"
+      - name: Generate platform icons
+        run: python scripts/make_icons.py
+      - name: Build desktop package
+        run: pyinstaller --noconfirm --clean packaging/AI-Jingjing.spec
+      - name: Verify macOS bundle structure
+        if: runner.os == 'macOS'
+        run: test -x "dist/AI知识库-AI静静.app/Contents/MacOS/AI知识库-AI静静"
+      - name: Verify Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Executable = Get-ChildItem -Path dist -Filter "*.exe" -Recurse | Select-Object -First 1
+          if (-not $Executable) { throw "PyInstaller did not produce an executable" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  source-security:
+    name: Release security checks
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate signing script
+        run: zsh -n packaging/sign_and_notarize.sh
+      - name: Validate example update manifest
+        run: python -m json.tool packaging/update-manifest.example.json >/dev/null

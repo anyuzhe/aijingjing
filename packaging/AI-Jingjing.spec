@@ -10,7 +10,12 @@ datas = [
     (str(project_root / "src" / "media_knowledge" / "desktop" / "assets"), "media_knowledge/desktop/assets"),
 ]
 binaries = []
-hiddenimports = collect_submodules("media_knowledge") + ["keyring.backends.macOS"]
+platform_keyring = (
+    ["keyring.backends.macOS"] if sys.platform == "darwin"
+    else ["keyring.backends.Windows"] if sys.platform == "win32"
+    else []
+)
+hiddenimports = collect_submodules("media_knowledge") + platform_keyring
 icon_candidate = project_root / "packaging" / (
     "AI-Jingjing.icns" if sys.platform == "darwin" else "AI-Jingjing.ico"
 )
@@ -36,17 +41,18 @@ exe = EXE(
     debug=False, bootloader_ignore_signals=False, strip=False, upx=True, console=False, icon=icon_file,
 )
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=True, name="AI知识库-AI静静")
-app = BUNDLE(
-    coll,
-    name="AI知识库-AI静静.app",
-    icon=icon_file,
-    bundle_identifier="com.aijingjing.knowledge",
-    info_plist={
-        "CFBundleDisplayName": "AI知识库-AI静静",
-        "CFBundleName": "AI静静",
-        "CFBundleShortVersionString": "2.0.5",
-        "CFBundleVersion": "2.0.5",
-        "NSHighResolutionCapable": True,
-        "NSMicrophoneUsageDescription": "用于导入和转写用户选择的音频资料。",
-    },
-)
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="AI知识库-AI静静.app",
+        icon=icon_file,
+        bundle_identifier="com.aijingjing.knowledge",
+        info_plist={
+            "CFBundleDisplayName": "AI知识库-AI静静",
+            "CFBundleName": "AI静静",
+            "CFBundleShortVersionString": "2.1.0",
+            "CFBundleVersion": "2.1.0",
+            "NSHighResolutionCapable": True,
+            "NSMicrophoneUsageDescription": "用于导入和转写用户选择的音频资料。",
+        },
+    )
