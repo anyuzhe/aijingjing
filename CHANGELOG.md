@@ -11,6 +11,7 @@
 - PP-StructureV3 按原始阅读顺序保留表格 Markdown、公式和版面坐标，模型在进程内复用，避免多页文档反复加载。
 - OCR 平均/最低置信度和低分行比例正式进入入库质检；没有可靠视觉兜底的极低置信结果会被拒绝。
 - 音视频转写自动路由可选 Apple MLX、NVIDIA CUDA 和标准包内置 CPU int8；界面明确展示实际路线，并同时产生 JSON/MD/TXT/SRT/VTT。
+- Apple Silicon 正式包现已内置 MLX/Metal 运行时；设置界面标明各档模型取舍，并可直接使用最高精度的 Whisper large-v3。
 - MLX 转写改为可终止的隔离子进程，点击停止后会回收推理进程，不再等待整段音频完成。
 - 新增转写完整性门禁，检查倒序、越界、异常重叠、空段和首尾覆盖。
 - 新增 YouTube、B 站、抖音、小红书和 X 公开链接连接器；优先保留公开字幕，不使用 Cookie、netrc 或代理。
@@ -36,6 +37,7 @@
 - Preserved PP-StructureV3 reading order, Markdown tables, formulas, and geometry while reusing one guarded pipeline per process.
 - Added OCR confidence and low-confidence ratios to the ingestion gate; extremely unreliable OCR without real vision evidence is rejected.
 - Added explicit routing across optional Apple MLX, NVIDIA CUDA, and the standard bundle's built-in CPU int8 runtime, with JSON/MD/TXT/SRT/VTT artifacts and integrity gates.
+- Official Apple Silicon bundles now include the MLX/Metal runtime, while settings explain each model tier and expose Whisper large-v3 as the highest-accuracy option.
 - Isolated MLX inference in a terminable worker so cancellation reclaims the process immediately.
 - Added a subtitle-first public connector for YouTube, Bilibili, Douyin, Xiaohongshu, and X without cookies, netrc, or proxies.
 - Added a streaming 2 GB ceiling, preflight size checks, and rejection of live, unfinished, or unmonitorable transports. Only HTTP/HTTPS and native DASH are accepted; HLS is rejected before download to prevent internal fallback to an unbounded FFmpeg downloader.

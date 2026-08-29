@@ -33,10 +33,20 @@ platform_keyring = (
     else []
 )
 hiddenimports = collect_submodules("media_knowledge") + platform_keyring
-for dynamic_package in ("yt_dlp", "mlx_whisper"):
-    if module_available(dynamic_package):
-        hiddenimports += collect_submodules(dynamic_package)
-        datas += collect_data_files(dynamic_package)
+if module_available("yt_dlp"):
+    hiddenimports += collect_submodules("yt_dlp")
+    datas += collect_data_files("yt_dlp")
+if module_available("mlx_whisper"):
+    # Importing the package recursively discovers every inference module. Do
+    # not collect torch_whisper: it is a conversion helper, is never used at
+    # runtime, and would add the entire PyTorch distribution to the app.
+    hiddenimports += ["mlx_whisper"]
+    datas += collect_data_files("mlx_whisper")
+if module_available("mlx"):
+    # MLX loads its Metal kernel library and native dylibs at runtime; normal
+    # Python import analysis alone does not reliably preserve these files.
+    datas += collect_data_files("mlx")
+    binaries += collect_dynamic_libs("mlx")
 icon_candidate = project_root / "packaging" / (
     "AI-Jingjing.icns" if sys.platform == "darwin" else "AI-Jingjing.ico"
 )
@@ -53,6 +63,7 @@ a = Analysis(
     excludes=[
         "tkinter", "matplotlib", "pytest", "rapidocr.inference_engine.tensorrt",
         "onnxruntime.tools", "onnxruntime.transformers", "keyring.testing",
+        "torch", "mlx_whisper.torch_whisper",
     ],
     noarchive=False,
 )

@@ -783,8 +783,14 @@ class SettingsDialog(QDialog):
         media_form.addRow("低置信度阈值", self.ocr_threshold)
 
         self.whisper_model = QComboBox()
-        for model in ("tiny", "base", "small", "medium", "large-v3"):
-            self.whisper_model.addItem(model, model)
+        for label, model in (
+            ("Tiny（速度最快，精度最低）", "tiny"),
+            ("Base（轻量）", "base"),
+            ("Small（默认平衡档）", "small"),
+            ("Medium（高精度）", "medium"),
+            ("Large v3（最高精度，推荐高质量转写）", "large-v3"),
+        ):
+            self.whisper_model.addItem(label, model)
             if model == controller.settings.whisper_model:
                 self.whisper_model.setCurrentIndex(self.whisper_model.count() - 1)
         media_form.addRow("语音识别模型", self.whisper_model)
@@ -806,6 +812,7 @@ class SettingsDialog(QDialog):
         media_hint = QLabel(
             "每次 OCR 会保留文字框、置信度和降级原因；"
             "音视频会同时产生 JSON、Markdown、TXT、SRT 和 VTT。"
+            "Apple Silicon 安装包内置 MLX 加速；Large v3 精度最高，但首次使用需下载约 3 GB 权重。"
             "任何慢速降级都会在任务中明确显示。"
         )
         media_hint.setWordWrap(True)

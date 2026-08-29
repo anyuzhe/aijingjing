@@ -40,7 +40,7 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 - 支持 Markdown、纯文本、Word、PDF、PPTX、图片、音频、视频、普通网页和微信公众号文章。
 - PDF 与 PPT 按页面理解，重要页面保留图像证据。
 - 音视频生成时间轴转写；视频还可抽取关键帧。
-- 安装可选 `apple-media` 组件后，Apple Silicon 优先使用 MLX；NVIDIA 环境优先使用 CUDA；标准安装包则使用内置 CPU int8，并明确展示实际路线。
+- Apple Silicon 的正式安装包内置 MLX/Metal 加速；NVIDIA 环境优先使用 CUDA；其他环境使用内置 CPU int8，并明确展示实际路线。模型可选 `tiny / base / small / medium / large-v3`，其中 `large-v3` 是最高精度档。
 - 转写同时保存 JSON、Markdown、TXT、SRT 和 VTT，保留引擎、设备、语言、时间完整性与降级原因。
 - 公开链接支持 YouTube、B 站、抖音、小红书和 X：优先取得公开字幕，无字幕时仅下载可逐块监控的 HTTP/HTTPS 或原生 DASH 媒体；直播、未完成回放和可能退回无界 FFmpeg 下载的 HLS 会在下载前拒绝，并提示先合法保存为本地文件。
 - 同名 PPT、PDF、录音和视频自动归为同一个 `Source Package`。
@@ -219,7 +219,7 @@ pip install -e '.[apple-media]'
 pip install -e '.[layout-ocr]'
 ```
 
-`.[full]` 已包含公开平台连接器与可独立工作的 faster-whisper。MLX Whisper 和 PaddleOCR 体积较大，分别作为 Apple Silicon 加速组件与专业版面组件按需安装；`layout-ocr` 已包含 PP-StructureV3 的文档解析依赖，但 PaddlePaddle 需要按 CPU/CUDA 与操作系统选择官方安装包。安装后应用会自动优先使用，诊断也会同时检查 PaddleOCR、PaddleX 与 PaddlePaddle，避免只装了外壳却误报可用。缺失组件会在“帮助 → 系统诊断”中明确显示，不会静默伪装为成功。
+`.[full]` 已包含公开平台连接器与可独立工作的 faster-whisper；源码开发时可用 `.[apple-media]` 增加 MLX。macOS Apple Silicon 正式包会自动包含 MLX，因此无需用户另装。PaddleOCR 仍作为专业版面组件按需安装；`layout-ocr` 已包含 PP-StructureV3 的文档解析依赖，但 PaddlePaddle 需要按 CPU/CUDA 与操作系统选择官方安装包。安装后应用会自动优先使用，诊断也会同时检查 PaddleOCR、PaddleX 与 PaddlePaddle，避免只装了外壳却误报可用。缺失组件会在“帮助 → 系统诊断”中明确显示，不会静默伪装为成功。
 
 ### 配置回答模型
 

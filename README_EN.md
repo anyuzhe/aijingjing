@@ -40,7 +40,7 @@ Every supported answer can lead back to an exact PDF page, PowerPoint slide, med
 - Ingest Markdown, text, Word, PDF, PPTX, images, audio, video, and web pages.
 - Understand PDFs and presentations page by page instead of extracting text only.
 - Produce timestamped speech transcripts and optional video keyframes.
-- With the optional `apple-media` component installed, prefer MLX on Apple Silicon; prefer CUDA on NVIDIA systems; the standard bundle uses its included CPU int8 runtime and displays the actual route explicitly.
+- The official Apple Silicon bundle includes MLX/Metal acceleration; NVIDIA systems prefer CUDA; other environments use the bundled CPU int8 runtime and display the actual route explicitly. Available models are `tiny / base / small / medium / large-v3`, with `large-v3` providing the highest accuracy.
 - Preserve JSON, Markdown, TXT, SRT, and VTT transcripts together with engine, device, language, integrity metrics, and fallback reasons.
 - Ingest public YouTube, Bilibili, Douyin, Xiaohongshu, and X links using public subtitles first, then only chunk-monitored HTTP/HTTPS or native DASH media. Live, unfinished replay, and HLS transports that could fall back to an unbounded FFmpeg downloader are rejected before download with guidance to save an authorized local copy first.
 - Group related PPT/PDF/audio/video files into one `Source Package`.
@@ -219,7 +219,7 @@ pip install -e '.[apple-media]'
 pip install -e '.[layout-ocr]'
 ```
 
-The `full` extra includes the public-platform connector and a standalone faster-whisper runtime. MLX Whisper and PaddleOCR remain optional Apple Silicon acceleration and professional-layout components because of their size. `layout-ocr` includes PP-StructureV3's document-parser dependencies, while PaddlePaddle itself must match the operating system and CPU/CUDA platform. Once installed, the application automatically prefers these components, and diagnostics verify PaddleOCR, PaddleX, and PaddlePaddle together instead of reporting a shell-only installation as ready. Missing capabilities are reported in **Help → System Diagnostics** and never silently presented as success.
+The `full` extra includes the public-platform connector and a standalone faster-whisper runtime; source builds can add MLX with `.[apple-media]`. Official macOS Apple Silicon bundles include MLX automatically, so users do not need to install it separately. PaddleOCR remains an optional professional-layout component. `layout-ocr` includes PP-StructureV3's document-parser dependencies, while PaddlePaddle itself must match the operating system and CPU/CUDA platform. Once installed, the application automatically prefers these components, and diagnostics verify PaddleOCR, PaddleX, and PaddlePaddle together instead of reporting a shell-only installation as ready. Missing capabilities are reported in **Help → System Diagnostics** and never silently presented as success.
 
 ### Configure answer providers
 
