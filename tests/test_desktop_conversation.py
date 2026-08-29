@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -22,6 +23,112 @@ except (ImportError, RuntimeError):  # pragma: no cover - desktop extra is optio
 
 @unittest.skipIf(create_application is None, "PySide6 desktop components are unavailable")
 class DesktopConversationTests(unittest.TestCase):
+    def test_every_async_entry_uses_one_identity_safe_operation_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            application, window = create_application(Path(temporary) / "data")
+            first = object()
+            second = object()
+            try:
+                with patch("media_knowledge.desktop.app.QMessageBox.information"):
+                    self.assertTrue(
+                        window._begin_db_operation(
+                            "回答生成", first, requested="生成回答"
+                        )
+                    )
+                    with patch.object(window.controller, "create_ingestion_job") as create_job:
+                        window.start_import(["blocked.md"])
+                    create_job.assert_not_called()
+
+                    window.prompt.setPlainText("不会在导入并发时发送")
+                    window.ask()
+                    self.assertEqual(window.prompt.toPlainText(), "不会在导入并发时发送")
+
+                    window.global_search.setText("互斥搜索")
+                    with patch.object(window.controller, "search") as search:
+                        window.run_search()
+                        window.run_search()
+                    search.assert_not_called()
+
+                window._finish_db_operation(first)
+                self.assertTrue(
+                    window._begin_db_operation(
+                        "知识库搜索", second, requested="搜索知识库"
+                    )
+                )
+                # A late finished signal from the first operation must not
+                # unlock the newer one.
+                window._finish_db_operation(first)
+                self.assertIs(window._active_db_operation_token, second)
+                window._finish_db_operation(second)
+                self.assertIsNone(window._active_db_operation_token)
+
+                with patch.object(window.thread_pool, "start") as start:
+                    window.run_search()
+                start.assert_called_once()
+                self.assertIsNotNone(window._search_operation_token)
+                window._finish_search(window._search_operation_token)
+                self.assertIsNone(window._active_db_operation_token)
+            finally:
+                window._finish_db_operation(first)
+                window._finish_db_operation(second)
+                window.close()
+                application.processEvents()
+
+    def test_database_wide_background_operations_are_mutually_exclusive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            application, window = create_application(Path(temporary) / "data")
+            started = threading.Event()
+            release = threading.Event()
+            completed: list[object] = []
+            second_called = False
+
+            def first_operation() -> dict[str, bool]:
+                started.set()
+                release.wait(3)
+                return {"ok": True}
+
+            def second_operation() -> None:
+                nonlocal second_called
+                second_called = True
+
+            try:
+                self.assertTrue(
+                    window._run_simple_background(
+                        "正在执行互斥测试…", first_operation, completed.append
+                    )
+                )
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and not started.is_set():
+                    application.processEvents()
+                    time.sleep(0.01)
+                self.assertTrue(started.is_set())
+                self.assertFalse(window.centralWidget().isEnabled())
+                with patch("media_knowledge.desktop.app.QMessageBox.information"):
+                    self.assertFalse(
+                        window._run_simple_background(
+                            "不应启动的第二任务", second_operation, lambda _value: None
+                        )
+                    )
+                self.assertFalse(second_called)
+
+                release.set()
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and window._background_worker is not None:
+                    application.processEvents()
+                    time.sleep(0.01)
+                application.processEvents()
+                self.assertIsNone(window._background_worker)
+                self.assertTrue(window.centralWidget().isEnabled())
+                self.assertEqual(completed, [{"ok": True}])
+            finally:
+                release.set()
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and window._background_worker is not None:
+                    application.processEvents()
+                    time.sleep(0.01)
+                window.close()
+                application.processEvents()
+
     def test_persisted_import_job_is_visible_and_resumable_after_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             data = Path(temporary) / "data"

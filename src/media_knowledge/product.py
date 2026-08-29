@@ -191,7 +191,12 @@ class DesktopSettings:
     auto_synthesize_notes: bool = True
     enable_cloud_vision: bool = True
     vision_max_images: int = 12
+    ocr_engine: str = "auto"
+    ocr_complex_layout_enabled: bool = True
+    ocr_low_confidence_threshold: float = 0.65
     whisper_model: str = "small"
+    transcription_engine: str = "auto"
+    transcription_allow_cpu_fallback: bool = True
     embedding_provider: str = "fastembed"
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     obsidian_vault: str | None = None
@@ -218,7 +223,19 @@ class DesktopSettings:
         except (TypeError, ValueError):
             return cls()
         settings.vision_max_images = min(50, max(0, int(settings.vision_max_images)))
+        try:
+            settings.ocr_low_confidence_threshold = min(
+                1.0, max(0.0, float(settings.ocr_low_confidence_threshold))
+            )
+        except (TypeError, ValueError, OverflowError):
+            settings.ocr_low_confidence_threshold = cls().ocr_low_confidence_threshold
         settings.watched_scan_minutes = min(1440, max(1, int(settings.watched_scan_minutes)))
+        settings.ocr_engine = str(settings.ocr_engine or "auto").strip().casefold()
+        settings.transcription_engine = str(settings.transcription_engine or "auto").strip().casefold()
+        if settings.ocr_engine not in {"auto", "rapidocr", "paddleocr"}:
+            settings.ocr_engine = "auto"
+        if settings.transcription_engine not in {"auto", "mlx", "cuda", "cpu", "faster-whisper"}:
+            settings.transcription_engine = "auto"
         if settings.embedding_provider not in {"fastembed", "hash"}:
             settings.embedding_provider = "fastembed"
         return settings

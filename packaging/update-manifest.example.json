@@ -1,6 +1,6 @@
 {
-  "version": "2.1.0",
-  "download_url": "https://downloads.example.com/AI-Jingjing-2.1.0.dmg",
+  "version": "2.2.0",
+  "download_url": "https://downloads.example.com/AI-Jingjing-2.2.0.dmg",
   "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "notes": "AI静静 2.1：可恢复对话与导入任务、真实流式回答、自适应 RAG、可解释证据质量、完整备份和安全更新。"
+  "notes": "AI静静 2.2：正式知识治理与可恢复回收站、OCR/转写质量增强、内容寻址公开视频证据、深度隐私扫描和安全分享副本。"
 }

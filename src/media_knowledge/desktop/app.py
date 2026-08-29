@@ -22,6 +22,7 @@ try:
         QComboBox,
         QDialog,
         QDialogButtonBox,
+        QDoubleSpinBox,
         QFileDialog,
         QFormLayout,
         QFrame,
@@ -139,6 +140,111 @@ QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """
 
 
+KNOWLEDGE_TYPE_LABELS = {
+    "source": "来源",
+    "topic": "主题",
+    "entity": "实体",
+    "analysis": "分析",
+    "decision": "决策",
+    "output": "成果",
+}
+KNOWLEDGE_STATUS_LABELS = {
+    "draft": "草稿",
+    "current": "当前有效",
+    "needs-review": "需要复核",
+    "stale": "可能过期",
+    "archived": "已归档",
+}
+KNOWLEDGE_MATURITY_LABELS = {
+    "unreviewed": "未检查",
+    "indexed": "已索引",
+    "summarized": "已总结",
+    "compiled": "已沉淀",
+    "low-value": "低价值保留",
+}
+KNOWLEDGE_RELATION_LABELS = {
+    "supports": "支持",
+    "extends": "扩展",
+    "contradicts": "冲突",
+    "supersedes": "取代",
+    "opens": "提出新问题",
+}
+KNOWLEDGE_HEALTH_LABELS = {
+    "missing_metadata": "缺少元数据",
+    "missing_summary": "缺少摘要",
+    "missing_body": "正文为空",
+    "source_without_evidence": "原始证据缺失",
+    "orphan_item": "知识孤立",
+    "isolated_source": "来源尚未沉淀",
+    "stale_current": "当前知识长期未更新",
+    "marked_stale": "知识已过期",
+    "high_value_uncompiled": "高价值来源未编译",
+    "compiled_without_source": "编译知识缺少来源",
+    "noncanonical_tag": "标签不统一",
+    "ambiguous_alias": "别名冲突",
+}
+PRIVACY_CATEGORY_LABELS = {
+    "private_key": "私钥",
+    "provider_api_key": "API 密钥",
+    "github_token": "GitHub 令牌",
+    "gitlab_token": "GitLab 令牌",
+    "huggingface_token": "模型服务令牌",
+    "slack_token": "协作服务令牌",
+    "aws_access_key": "云平台密钥",
+    "google_api_key": "Google API 密钥",
+    "jwt_token": "JWT 令牌",
+    "bearer_token": "Bearer 认证令牌",
+    "credential_assignment": "疑似凭据赋值",
+    "email_address": "电子邮箱",
+    "phone_number": "手机号",
+    "absolute_user_path": "本机用户路径",
+    "sensitive_path": "敏感路径",
+    "secret_like_file": "凭据类文件",
+    "symbolic_link": "符号链接",
+    "image_exif": "图片 EXIF 元数据",
+    "image_gps_exif": "图片 GPS 位置",
+    "image_text_unscanned": "图片文字未 OCR",
+    "image_ocr_unavailable": "图片 OCR 不可用",
+    "image_original_container_not_shareable": "原始图片容器不进入安全副本",
+    "pdf_parser_unavailable": "PDF 解析组件不可用",
+    "pdf_content_unscanned": "PDF 内容未完整扫描",
+    "pdf_encrypted_content": "PDF 已加密",
+    "pdf_visual_content_unscanned": "PDF 视觉内容未 OCR",
+    "pdf_visual_content_unreadable": "PDF 视觉内容无法读取",
+    "pdf_attachment_unscanned": "PDF 附件未完整扫描",
+    "pdf_original_container_not_shareable": "原始 PDF 不进入安全副本",
+    "media_content_unscanned": "音视频内容未完整扫描",
+    "office_content_unscanned": "Office 内容未完整扫描",
+    "office_binary_unscanned": "旧版 Office 二进制未扫描",
+    "office_binary_content_unscanned": "Office 嵌入内容未扫描",
+    "office_encrypted_content": "Office 内容已加密",
+    "office_xml_unreadable": "Office XML 无法解析",
+    "office_original_container_not_shareable": "原始 Office/ODF 不进入安全副本",
+    "archive_content_unscanned": "压缩包内容未扫描",
+    "binary_content_unscanned": "二进制内容未解析",
+}
+INGESTION_STAGE_LABELS = {
+    "queued": "等待处理",
+    "preparing": "识别资料",
+    "extracting": "解析内容",
+    "validating": "质量检查",
+    "archiving": "归档原件",
+    "indexing": "建立索引",
+    "noting": "生成笔记",
+    "complete": "完成",
+    "failed": "处理失败",
+    "cancelled": "已取消",
+}
+INGESTION_STATUS_LABELS = {
+    "created": "已新建",
+    "updated": "已更新",
+    "unchanged": "无变化",
+    "duplicate": "重复资料",
+    "failed": "失败",
+    "cancelled": "已取消",
+}
+
+
 def _markdown_html(markdown: str) -> str:
     document = QTextDocument()
     document.setMarkdown(markdown)
@@ -168,6 +274,241 @@ class Worker(QRunnable):
             self.signals.error.emit(detail)
         finally:
             self.signals.finished.emit()
+
+
+class KnowledgeCaptureDialog(QDialog):
+    """Collect governance metadata before promoting an answer into durable knowledge."""
+
+    def __init__(
+        self,
+        *,
+        suggested_title: str,
+        suggested_summary: str,
+        evidence_count: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("沉淀为正式知识")
+        self.setMinimumWidth(620)
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "把当前回答从一次性对话提升为可检索、可复核的正式知识。"
+            f"保存后会关联当前回答使用的 {evidence_count} 条来源证据。"
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("muted")
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        self.title_edit = QLineEdit(suggested_title.strip()[:180])
+        self.title_edit.setAccessibleName("知识标题")
+        form.addRow("标题（必填）", self.title_edit)
+        self.type_combo = QComboBox()
+        for item_type in ("analysis", "topic", "entity", "decision", "output"):
+            self.type_combo.addItem(KNOWLEDGE_TYPE_LABELS[item_type], item_type)
+        self.type_combo.setAccessibleName("知识类型")
+        form.addRow("知识类型", self.type_combo)
+        self.status_combo = QComboBox()
+        for status in ("needs-review", "draft", "current"):
+            self.status_combo.addItem(KNOWLEDGE_STATUS_LABELS[status], status)
+        self.status_combo.setAccessibleName("知识状态")
+        form.addRow("状态", self.status_combo)
+        self.summary_edit = QPlainTextEdit(suggested_summary.strip()[:1000])
+        self.summary_edit.setAccessibleName("知识摘要")
+        self.summary_edit.setPlaceholderText("用一两句话概括这条知识，便于以后搜索和判断。")
+        self.summary_edit.setFixedHeight(84)
+        form.addRow("摘要", self.summary_edit)
+        self.aliases_edit = QLineEdit()
+        self.aliases_edit.setPlaceholderText("中文别名、English alias（用逗号分隔）")
+        self.aliases_edit.setAccessibleName("知识别名")
+        form.addRow("别名", self.aliases_edit)
+        self.tags_edit = QLineEdit()
+        self.tags_edit.setPlaceholderText("例如：slam, lidar, 工程实践")
+        self.tags_edit.setAccessibleName("知识标签")
+        form.addRow("标签", self.tags_edit)
+        layout.addLayout(form)
+
+        note = QLabel("AI 生成内容默认标记为“需要复核”；只有确认无误后再改为“当前有效”。")
+        note.setWordWrap(True)
+        note.setObjectName("muted")
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText("沉淀为知识")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _split_values(value: str) -> list[str]:
+        normalized = value.replace("，", ",").replace("\n", ",")
+        return list(dict.fromkeys(item.strip() for item in normalized.split(",") if item.strip()))
+
+    def accept(self) -> None:
+        if not self.title_edit.text().strip():
+            QMessageBox.warning(self, "还需要标题", "请填写一个便于以后检索的知识标题。")
+            self.title_edit.setFocus(Qt.OtherFocusReason)
+            return
+        super().accept()
+
+    def values(self) -> dict[str, object]:
+        return {
+            "title": self.title_edit.text().strip(),
+            "item_type": str(self.type_combo.currentData()),
+            "status": str(self.status_combo.currentData()),
+            "summary": self.summary_edit.toPlainText().strip(),
+            "aliases": self._split_values(self.aliases_edit.text()),
+            "tags": self._split_values(self.tags_edit.text()),
+        }
+
+
+class KnowledgeHealthDialog(QDialog):
+    def __init__(self, report: dict[str, object], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("知识体检中心")
+        self.resize(1040, 650)
+        layout = QVBoxLayout(self)
+        counts = report.get("counts") if isinstance(report.get("counts"), dict) else {}
+        issue_count = int(report.get("issue_count") or len(report.get("issues") or []))
+        summary = QLabel(
+            f"正式知识 {int(counts.get('items', 0))} 条 · 待复核 {int(counts.get('needs_review', 0))} 条 · "
+            f"可能过期 {int(counts.get('stale', 0))} 条 · 共发现 {issue_count} 个治理提醒"
+        )
+        summary.setWordWrap(True)
+        summary.setStyleSheet("font-size:15px;font-weight:650;color:#285d7a;")
+        layout.addWidget(summary)
+        intro = QLabel("问题会同时说明原因和恢复建议；状态不只依赖颜色，方便键盘和辅助功能用户判断。")
+        intro.setObjectName("muted")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.table = QTableWidget(0, 6)
+        self.table.setAccessibleName("知识健康问题列表")
+        self.table.setHorizontalHeaderLabels(["级别", "问题", "知识", "类型", "说明", "建议操作"])
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        issues = report.get("issues") or []
+        self.table.setRowCount(len(issues))
+        severity_labels = {"error": "需处理", "warning": "需关注", "info": "建议"}
+        for row_index, issue in enumerate(issues):
+            values = [
+                severity_labels.get(str(issue.get("severity")), str(issue.get("severity") or "建议")),
+                KNOWLEDGE_HEALTH_LABELS.get(
+                    str(issue.get("category") or issue.get("code") or ""),
+                    str(issue.get("category") or issue.get("code") or "治理提醒"),
+                ),
+                str(issue.get("title") or issue.get("item_title") or "—"),
+                KNOWLEDGE_TYPE_LABELS.get(str(issue.get("item_type") or ""), str(issue.get("item_type") or "—")),
+                str(issue.get("message") or issue.get("detail") or ""),
+                str(issue.get("suggestion") or issue.get("recovery") or "打开知识后补充信息"),
+            ]
+            for column, value in enumerate(values):
+                self.table.setItem(row_index, column, QTableWidgetItem(value))
+        layout.addWidget(self.table, 1)
+        if not issues:
+            empty = QLabel("✓ 当前没有发现需要处理的知识治理问题。")
+            empty.setStyleSheet("color:#28705f;font-weight:600;")
+            layout.addWidget(empty)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.button(QDialogButtonBox.Close).setText("关闭")
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class KnowledgeTrashDialog(QDialog):
+    """Compact recovery surface for governed knowledge tombstones."""
+
+    def __init__(
+        self, controller: DesktopController, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.controller = controller
+        self.restored_ids: list[str] = []
+        self.setWindowTitle("知识回收站")
+        self.resize(720, 480)
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "删除的正式知识会保留条目、别名、标签、知识关系和 Markdown 笔记。"
+            "选择一项即可恢复；原位置已有文件时会使用安全的新文件名。"
+        )
+        intro.setObjectName("muted")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.trash_list = QListWidget()
+        self.trash_list.setAccessibleName("知识回收站列表")
+        self.trash_list.setWordWrap(True)
+        self.trash_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.trash_list.currentItemChanged.connect(self._selection_changed)
+        self.trash_list.itemDoubleClicked.connect(lambda _item: self._restore_selected())
+        layout.addWidget(self.trash_list, 1)
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("muted")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self.restore_button = QPushButton("恢复所选知识")
+        self.restore_button.setAccessibleName("恢复所选知识")
+        self.restore_button.setEnabled(False)
+        self.restore_button.clicked.connect(self._restore_selected)
+        actions.addWidget(self.restore_button)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.accept)
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+        self.refresh_items()
+
+    def refresh_items(self) -> None:
+        self.trash_list.clear()
+        try:
+            rows = self.controller.knowledge_trash_items()
+        except (OSError, ValueError) as exc:
+            self.status_label.setText(f"无法读取知识回收站：{exc}")
+            self.restore_button.setEnabled(False)
+            return
+        for record in rows:
+            item_type = str(record.get("item_type") or "analysis")
+            deleted_at = str(record.get("deleted_at") or "未知时间")
+            note_label = "含 Markdown" if record.get("has_note") else "无独立笔记"
+            relation_count = int(record.get("relation_count") or 0)
+            item = QListWidgetItem(
+                f"{KNOWLEDGE_TYPE_LABELS.get(item_type, item_type)} · "
+                f"{record.get('title') or '未命名知识'}\n"
+                f"删除于 {deleted_at} · {note_label} · {relation_count} 条关系"
+            )
+            item.setData(Qt.UserRole, record)
+            self.trash_list.addItem(item)
+        self.status_label.setText(
+            "回收站为空。" if not rows else f"共有 {len(rows)} 条可恢复知识。"
+        )
+        self._selection_changed(self.trash_list.currentItem())
+
+    def _selection_changed(self, item: QListWidgetItem | None, _previous=None) -> None:
+        self.restore_button.setEnabled(item is not None)
+
+    def _restore_selected(self) -> None:
+        item = self.trash_list.currentItem()
+        record = item.data(Qt.UserRole) if item is not None else None
+        if not isinstance(record, dict):
+            return
+        try:
+            restored = self.controller.restore_knowledge_item(
+                str(record.get("tombstone_id") or "")
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.status_label.setText(f"恢复失败：{exc}")
+            return
+        restored_id = str(restored.get("id") or "")
+        if restored_id:
+            self.restored_ids.append(restored_id)
+        relation_count = int(restored.get("restored_relation_count") or 0)
+        self.refresh_items()
+        self.status_label.setText(
+            f"已恢复“{restored.get('title') or '未命名知识'}”及 {relation_count} 条仍有效关系。"
+        )
 
 
 class PromptEdit(QPlainTextEdit):
@@ -417,6 +758,61 @@ class SettingsDialog(QDialog):
         form.addRow("更新清单", self.update_url)
         tabs.addTab(general, "通用")
 
+        media = QWidget()
+        media_form = QFormLayout(media)
+        self.ocr_engine = QComboBox()
+        for label, value in (
+            ("自动（普通图片优先 RapidOCR）", "auto"),
+            ("RapidOCR（轻量、速度优先）", "rapidocr"),
+            ("PaddleOCR PP-StructureV3（复杂版面）", "paddleocr"),
+        ):
+            self.ocr_engine.addItem(label, value)
+            if value == controller.settings.ocr_engine:
+                self.ocr_engine.setCurrentIndex(self.ocr_engine.count() - 1)
+        self.ocr_engine.setAccessibleName("OCR 解析引擎")
+        media_form.addRow("OCR 引擎", self.ocr_engine)
+        self.complex_ocr = QCheckBox("自动识别表格、公式、多栏等复杂版面")
+        self.complex_ocr.setChecked(controller.settings.ocr_complex_layout_enabled)
+        media_form.addRow("", self.complex_ocr)
+        self.ocr_threshold = QDoubleSpinBox()
+        self.ocr_threshold.setRange(0.0, 1.0)
+        self.ocr_threshold.setSingleStep(0.05)
+        self.ocr_threshold.setDecimals(2)
+        self.ocr_threshold.setValue(controller.settings.ocr_low_confidence_threshold)
+        self.ocr_threshold.setAccessibleName("OCR 低置信度阈值")
+        media_form.addRow("低置信度阈值", self.ocr_threshold)
+
+        self.whisper_model = QComboBox()
+        for model in ("tiny", "base", "small", "medium", "large-v3"):
+            self.whisper_model.addItem(model, model)
+            if model == controller.settings.whisper_model:
+                self.whisper_model.setCurrentIndex(self.whisper_model.count() - 1)
+        media_form.addRow("语音识别模型", self.whisper_model)
+        self.transcription_engine = QComboBox()
+        for label, value in (
+            ("自动（Apple MLX → NVIDIA CUDA → CPU）", "auto"),
+            ("Apple Silicon · MLX", "mlx"),
+            ("NVIDIA · CUDA", "cuda"),
+            ("CPU · int8", "cpu"),
+        ):
+            self.transcription_engine.addItem(label, value)
+            if value == controller.settings.transcription_engine:
+                self.transcription_engine.setCurrentIndex(self.transcription_engine.count() - 1)
+        self.transcription_engine.setAccessibleName("音视频转写引擎")
+        media_form.addRow("转写加速", self.transcription_engine)
+        self.cpu_fallback = QCheckBox("加速引擎不可用时，允许明确降级到 CPU（较慢）")
+        self.cpu_fallback.setChecked(controller.settings.transcription_allow_cpu_fallback)
+        media_form.addRow("", self.cpu_fallback)
+        media_hint = QLabel(
+            "每次 OCR 会保留文字框、置信度和降级原因；"
+            "音视频会同时产生 JSON、Markdown、TXT、SRT 和 VTT。"
+            "任何慢速降级都会在任务中明确显示。"
+        )
+        media_hint.setWordWrap(True)
+        media_hint.setObjectName("muted")
+        media_form.addRow("", media_hint)
+        tabs.addTab(media, "多媒体解析")
+
         providers = QWidget()
         provider_form = QFormLayout(providers)
         provider_status = {item["id"]: item for item in controller.providers.status()}
@@ -484,6 +880,12 @@ class SettingsDialog(QDialog):
             create_source_notes=self.notes.isChecked(),
             auto_synthesize_notes=self.synthesis.isChecked(),
             enable_cloud_vision=self.vision.isChecked(),
+            ocr_engine=str(self.ocr_engine.currentData() or "auto"),
+            ocr_complex_layout_enabled=self.complex_ocr.isChecked(),
+            ocr_low_confidence_threshold=float(self.ocr_threshold.value()),
+            whisper_model=str(self.whisper_model.currentData() or "small"),
+            transcription_engine=str(self.transcription_engine.currentData() or "auto"),
+            transcription_allow_cpu_fallback=self.cpu_fallback.isChecked(),
             watched_folders_enabled=self.watched_enabled.isChecked(),
             watched_scan_minutes=min(1440, max(1, int(self.watched_minutes.text() or "10"))),
             update_manifest_url=self.update_url.text().strip() or None,
@@ -516,6 +918,14 @@ class MainWindow(QMainWindow):
         self.last_answer_markdown = ""
         self.last_retrieval_info: dict[str, object] = {}
         self._watch_scan_running = False
+        self._watch_operation_token: object | None = None
+        self._background_worker: Worker | None = None
+        self._background_operation_label = ""
+        self._active_db_operation_token: object | None = None
+        self._active_db_operation_label = ""
+        self._import_operation_token: object | None = None
+        self._answer_operation_token: object | None = None
+        self._search_operation_token: object | None = None
         self.setWindowTitle(PRODUCT_NAME)
         self.resize(1510, 920)
         self.setMinimumSize(1120, 700)
@@ -524,6 +934,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._load_models()
         self.refresh_library()
+        self.refresh_knowledge()
         self.refresh_conversations()
         self.refresh_ingestion_jobs()
         self._refresh_status()
@@ -576,6 +987,9 @@ class MainWindow(QMainWindow):
         quality = QAction("入库质检中心…", self)
         quality.triggered.connect(self.show_quality_center)
         knowledge_menu.addAction(quality)
+        governance = QAction("知识体检中心…", self)
+        governance.triggered.connect(self.show_knowledge_health)
+        knowledge_menu.addAction(governance)
         retrieval_lab = QAction("检索实验室…", self)
         retrieval_lab.triggered.connect(self.open_retrieval_lab)
         knowledge_menu.addAction(retrieval_lab)
@@ -619,6 +1033,13 @@ class MainWindow(QMainWindow):
         repair = QAction("数据库检查与修复…", self)
         repair.triggered.connect(self.repair_database)
         safety_menu.addAction(repair)
+        safety_menu.addSeparator()
+        privacy_scan = QAction("运行本地隐私扫描…", self)
+        privacy_scan.triggered.connect(self.run_privacy_scan)
+        safety_menu.addAction(privacy_scan)
+        share_copy = QAction("生成安全分享副本…", self)
+        share_copy.triggered.connect(self.create_safe_share_copy)
+        safety_menu.addAction(share_copy)
 
         settings = QAction("设置…", self)
         settings.setShortcut(QKeySequence.Preferences)
@@ -744,6 +1165,58 @@ class MainWindow(QMainWindow):
         library_layout.addWidget(self.document_list, 1)
         self.left_tabs.addTab(library_tab, "资料库")
 
+        knowledge_tab = QWidget()
+        self.knowledge_tab = knowledge_tab
+        knowledge_layout = QVBoxLayout(knowledge_tab)
+        knowledge_layout.setContentsMargins(0, 8, 0, 0)
+        self.knowledge_summary = QLabel("正在读取知识网络…")
+        self.knowledge_summary.setObjectName("muted")
+        self.knowledge_summary.setWordWrap(True)
+        knowledge_layout.addWidget(self.knowledge_summary)
+        self.knowledge_search = QLineEdit()
+        self.knowledge_search.setPlaceholderText("搜索主题、实体、分析或决策…")
+        self.knowledge_search.setAccessibleName("搜索正式知识")
+        self.knowledge_search.textChanged.connect(self.refresh_knowledge)
+        knowledge_layout.addWidget(self.knowledge_search)
+        knowledge_filters = QHBoxLayout()
+        self.knowledge_type_filter = QComboBox()
+        self.knowledge_type_filter.addItem("全部类型", "")
+        for item_type in ("source", "topic", "entity", "analysis", "decision", "output"):
+            self.knowledge_type_filter.addItem(KNOWLEDGE_TYPE_LABELS[item_type], item_type)
+        self.knowledge_type_filter.currentIndexChanged.connect(self.refresh_knowledge)
+        knowledge_filters.addWidget(self.knowledge_type_filter)
+        self.knowledge_status_filter = QComboBox()
+        self.knowledge_status_filter.addItem("全部状态", "")
+        for status in ("needs-review", "current", "draft", "stale", "archived"):
+            self.knowledge_status_filter.addItem(KNOWLEDGE_STATUS_LABELS[status], status)
+        self.knowledge_status_filter.currentIndexChanged.connect(self.refresh_knowledge)
+        knowledge_filters.addWidget(self.knowledge_status_filter)
+        knowledge_layout.addLayout(knowledge_filters)
+        self.knowledge_list = QListWidget()
+        self.knowledge_list.setAccessibleName("正式知识列表")
+        self.knowledge_list.setWordWrap(True)
+        self.knowledge_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.knowledge_list.currentItemChanged.connect(self._show_knowledge_item)
+        self.knowledge_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.knowledge_list.customContextMenuRequested.connect(self._knowledge_menu)
+        knowledge_layout.addWidget(self.knowledge_list, 1)
+        knowledge_actions = QHBoxLayout()
+        promote = QPushButton("沉淀当前回答")
+        promote.setToolTip("把当前回答保存为主题、实体、分析、决策或成果")
+        promote.clicked.connect(self.capture_last_answer_as_knowledge)
+        knowledge_actions.addWidget(promote, 1)
+        inspect = QPushButton("体检")
+        inspect.setToolTip("检查待复核、过期、孤立和缺少来源的知识")
+        inspect.clicked.connect(self.show_knowledge_health)
+        knowledge_actions.addWidget(inspect)
+        self.knowledge_trash_button = QPushButton("回收站")
+        self.knowledge_trash_button.setAccessibleName("打开知识回收站")
+        self.knowledge_trash_button.setToolTip("查看并恢复已删除的正式知识")
+        self.knowledge_trash_button.clicked.connect(self.show_knowledge_trash)
+        knowledge_actions.addWidget(self.knowledge_trash_button)
+        knowledge_layout.addLayout(knowledge_actions)
+        self.left_tabs.addTab(knowledge_tab, "知识")
+
         history_tab = QWidget()
         history_layout = QVBoxLayout(history_tab)
         history_layout.setContentsMargins(0, 8, 0, 0)
@@ -777,6 +1250,7 @@ class MainWindow(QMainWindow):
         self.left_tabs.addTab(history_tab, "对话")
 
         task_tab = QWidget()
+        self.task_tab = task_tab
         task_layout = QVBoxLayout(task_tab)
         task_layout.setContentsMargins(0, 8, 0, 0)
         self.task_list = QListWidget()
@@ -844,6 +1318,10 @@ class MainWindow(QMainWindow):
         self.unhelpful_button = QPushButton("需改进")
         self.unhelpful_button.clicked.connect(lambda: self.save_answer_feedback("down"))
         answer_actions_layout.addWidget(self.unhelpful_button)
+        self.capture_knowledge_button = QPushButton("沉淀为知识")
+        self.capture_knowledge_button.setToolTip("将当前回答提升为可复核、可关联来源的正式知识")
+        self.capture_knowledge_button.clicked.connect(self.capture_last_answer_as_knowledge)
+        answer_actions_layout.addWidget(self.capture_knowledge_button)
         answer_actions_layout.addStretch()
         self.answer_actions.hide()
         layout.addWidget(self.answer_actions)
@@ -1094,7 +1572,7 @@ class MainWindow(QMainWindow):
         value, accepted = QInputDialog.getText(
             self,
             "导入网页或视频链接",
-            "粘贴公开网页、微信视频号或音视频直链：",
+            "粘贴公开网页、微信、YouTube、B 站、抖音、小红书、X 或音视频直链：",
             text="https://",
         )
         if accepted and value.strip():
@@ -1104,25 +1582,30 @@ class MainWindow(QMainWindow):
         if self.import_token is not None:
             QMessageBox.information(self, "导入进行中", "请等待当前批次完成，或取消后再导入。")
             return
+        token = CancellationToken()
+        operation_token = object()
+        if not self._begin_db_operation("资料导入", operation_token, requested="导入资料"):
+            return
         self.import_items = list(items)
         try:
             job = self.controller.create_ingestion_job(self.import_items)
             self.import_job_id = str(job["id"])
         except (OSError, ValueError) as exc:
+            self._finish_db_operation(operation_token)
             self._operation_error("无法创建导入任务", str(exc))
             return
-        self.import_token = CancellationToken()
+        self.import_token = token
+        self._import_operation_token = operation_token
         self.task_list.clear()
         for value in items:
             item = QListWidgetItem(f"等待处理  ·  {Path(value).name or value}")
             item.setData(Qt.UserRole, value)
             item.setData(Qt.UserRole + 1, "pending")
             self.task_list.addItem(item)
-        self.left_tabs.setCurrentIndex(2)
+        self.left_tabs.setCurrentWidget(self.task_tab)
         self.pause_button.setEnabled(True)
         self.cancel_button.setEnabled(True)
         self.retry_button.setEnabled(False)
-        token = self.import_token
         job_id = self.import_job_id
 
         def execute(signals: WorkerSignals):
@@ -1137,7 +1620,9 @@ class MainWindow(QMainWindow):
         worker.signals.progress.connect(self._import_progress)
         worker.signals.result.connect(self._import_complete)
         worker.signals.error.connect(self._import_error)
-        worker.signals.finished.connect(self._import_finished)
+        worker.signals.finished.connect(
+            lambda operation_token=operation_token: self._import_finished(operation_token)
+        )
         self.thread_pool.start(worker)
         self.statusBar().showMessage(f"正在后台导入 {len(items)} 份资料…")
 
@@ -1145,7 +1630,12 @@ class MainWindow(QMainWindow):
         for index in range(self.task_list.count()):
             item = self.task_list.item(index)
             if item.data(Qt.UserRole) == event.item:
-                item.setText(f"{event.percent:>3}%  ·  {event.message}\n{Path(event.item).name or event.item}")
+                stage = INGESTION_STAGE_LABELS.get(event.stage, event.stage or "处理中")
+                item.setText(
+                    f"{event.percent:>3}%  ·  {stage}\n"
+                    f"{event.message}\n{Path(event.item).name or event.item}"
+                )
+                item.setToolTip(f"当前阶段：{stage}\n{event.message}")
                 item.setData(Qt.UserRole + 1, event.stage)
                 break
         self.statusBar().showMessage(event.message)
@@ -1166,7 +1656,8 @@ class MainWindow(QMainWindow):
                     )
                     item.setText(
                         f"{icon} {result.title or Path(result.item).name}\n"
-                        f"{result.status} · {result.chunks} 个知识块{quality_label}"
+                        f"{INGESTION_STATUS_LABELS.get(result.status, result.status)} · "
+                        f"{result.chunks} 个知识块{quality_label}"
                     )
                     item.setData(Qt.UserRole + 1, result.status)
                     checks = [
@@ -1179,12 +1670,18 @@ class MainWindow(QMainWindow):
             12000,
         )
         self.refresh_library()
+        self.refresh_knowledge()
         self.refresh_conversations()
         self._refresh_status()
 
-    def _import_finished(self) -> None:
+    def _import_finished(self, operation_token: object | None = None) -> None:
+        if operation_token is not None and self._import_operation_token is not operation_token:
+            return
         self.import_token = None
         self.import_job_id = None
+        self._import_operation_token = None
+        if operation_token is not None:
+            self._finish_db_operation(operation_token)
         self.pause_button.setEnabled(False)
         self.pause_button.setText("暂停")
         self.cancel_button.setEnabled(False)
@@ -1223,6 +1720,8 @@ class MainWindow(QMainWindow):
             self.refresh_ingestion_jobs()
 
     def retry_failed(self) -> None:
+        if self._background_conflict("继续导入任务"):
+            return
         if self.import_token is None:
             item = self.task_list.currentItem()
             record = item.data(Qt.UserRole + 2) if item else None
@@ -1299,9 +1798,17 @@ class MainWindow(QMainWindow):
     def _resume_ingestion_job(self, job_id: str, *, retry: bool) -> None:
         if self.import_token is not None:
             return
+        operation_token = object()
+        if not self._begin_db_operation(
+            "资料导入",
+            operation_token,
+            requested="继续导入任务",
+        ):
+            return
         try:
             record = self.controller.ingestion_job(job_id)
         except (OSError, ValueError) as exc:
+            self._finish_db_operation(operation_token)
             self._operation_error("无法读取任务", str(exc))
             return
         items = [
@@ -1310,18 +1817,20 @@ class MainWindow(QMainWindow):
             and str(value.get("status")) in ({"failed", "cancelled"} if retry else {"queued"})
         ]
         if not items:
+            self._finish_db_operation(operation_token)
             self.statusBar().showMessage("该任务没有可继续的资料", 5000)
             return
         self.import_items = items
         self.import_job_id = job_id
         self.import_token = CancellationToken()
+        self._import_operation_token = operation_token
         self.task_list.clear()
         for value in items:
             item = QListWidgetItem(f"等待处理  ·  {Path(value).name or value}")
             item.setData(Qt.UserRole, value)
             item.setData(Qt.UserRole + 1, "pending")
             self.task_list.addItem(item)
-        self.left_tabs.setCurrentIndex(2)
+        self.left_tabs.setCurrentWidget(self.task_tab)
         self._update_task_controls()
         token = self.import_token
 
@@ -1337,7 +1846,9 @@ class MainWindow(QMainWindow):
         worker.signals.progress.connect(self._import_progress)
         worker.signals.result.connect(self._import_complete)
         worker.signals.error.connect(self._import_error)
-        worker.signals.finished.connect(self._import_finished)
+        worker.signals.finished.connect(
+            lambda operation_token=operation_token: self._import_finished(operation_token)
+        )
         self.thread_pool.start(worker)
         self.statusBar().showMessage(f"正在{'重试' if retry else '继续'} {len(items)} 份资料…")
 
@@ -1375,6 +1886,283 @@ class MainWindow(QMainWindow):
             if selected and isinstance(selected, dict) and selected.get("id") == document["id"]:
                 self.document_list.setCurrentItem(item)
         self._filter_library(self.library_filter.text())
+
+    def refresh_knowledge(self, _value: object = None) -> None:
+        if not hasattr(self, "knowledge_list"):
+            return
+        selected = self.knowledge_list.currentItem()
+        selected_id = str(selected.data(Qt.UserRole).get("id")) if selected and isinstance(
+            selected.data(Qt.UserRole), dict
+        ) else ""
+        query = self.knowledge_search.text().strip()
+        item_type = str(self.knowledge_type_filter.currentData() or "")
+        status = str(self.knowledge_status_filter.currentData() or "")
+        try:
+            rows = self.controller.knowledge_items(
+                query=query,
+                item_type=item_type or None,
+                status=status or None,
+                limit=500,
+            )
+            health = self.controller.knowledge_health()
+        except Exception as exc:
+            self.knowledge_summary.setText(f"无法读取知识网络：{exc}")
+            return
+        self.knowledge_list.clear()
+        for record in rows:
+            record_type = str(record.get("item_type") or record.get("type") or "analysis")
+            record_status = str(record.get("status") or "draft")
+            maturity = str(record.get("maturity") or "unreviewed")
+            title = str(record.get("title") or "未命名知识")
+            summary = str(record.get("summary") or "").strip()
+            text = (
+                f"{KNOWLEDGE_TYPE_LABELS.get(record_type, record_type)} · {title}\n"
+                f"{KNOWLEDGE_STATUS_LABELS.get(record_status, record_status)} · "
+                f"{KNOWLEDGE_MATURITY_LABELS.get(maturity, maturity)}"
+            )
+            if summary:
+                text += f"\n{summary[:80]}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, record)
+            aliases = record.get("aliases") or []
+            item.setToolTip(summary or ("别名：" + "、".join(str(value) for value in aliases) if aliases else title))
+            self.knowledge_list.addItem(item)
+            if str(record.get("id")) == selected_id:
+                self.knowledge_list.setCurrentItem(item)
+        counts = health.get("counts") if isinstance(health.get("counts"), dict) else {}
+        self.knowledge_summary.setText(
+            f"知识 {int(counts.get('items', len(rows)))} 条 · "
+            f"待复核 {int(counts.get('needs_review', 0))} · "
+            f"过期 {int(counts.get('stale', 0))} · "
+            f"提醒 {int(health.get('issue_count', len(health.get('issues') or [])))}"
+        )
+
+    def _show_knowledge_item(self, item: QListWidgetItem | None) -> None:
+        if not item:
+            return
+        record = item.data(Qt.UserRole)
+        if not isinstance(record, dict):
+            return
+        item_id = str(record.get("id") or "")
+        try:
+            detail = self.controller.knowledge_item(item_id) if item_id else record
+        except (OSError, ValueError):
+            detail = record
+        item_type = str(detail.get("item_type") or detail.get("type") or "analysis")
+        status = str(detail.get("status") or "draft")
+        maturity = str(detail.get("maturity") or "unreviewed")
+        aliases = "、".join(str(value) for value in detail.get("aliases") or []) or "无"
+        tags = "、".join(str(value) for value in detail.get("tags") or []) or "无"
+        relation_lines = []
+        for relation in detail.get("relations") or []:
+            if not isinstance(relation, dict):
+                continue
+            relation_lines.append(
+                f"- **{KNOWLEDGE_RELATION_LABELS.get(str(relation.get('relation_type') or relation.get('type') or ''), str(relation.get('relation_type') or relation.get('type') or '关联'))}** "
+                f"{relation.get('related_title') or relation.get('target_title') or relation.get('source_title') or '相关知识'}"
+            )
+        body = str(detail.get("body") or "").strip()
+        summary = str(detail.get("summary") or "").strip()
+        markdown = (
+            f"# {detail.get('title') or '未命名知识'}\n\n"
+            f"- 类型：{KNOWLEDGE_TYPE_LABELS.get(item_type, item_type)}\n"
+            f"- 状态：{KNOWLEDGE_STATUS_LABELS.get(status, status)}\n"
+            f"- 成熟度：{KNOWLEDGE_MATURITY_LABELS.get(maturity, maturity)}\n"
+            f"- 别名：{aliases}\n- 标签：{tags}\n\n"
+            f"## 摘要\n\n{summary or '尚未填写摘要。'}\n\n"
+            + (f"## 正文\n\n{body}\n\n" if body else "")
+            + ("## 知识关系\n\n" + "\n".join(relation_lines) if relation_lines else "")
+        )
+        self.preview.setMarkdown(markdown)
+
+    def _selected_knowledge_record(self) -> dict[str, object] | None:
+        item = self.knowledge_list.currentItem() if hasattr(self, "knowledge_list") else None
+        value = item.data(Qt.UserRole) if item else None
+        return value if isinstance(value, dict) else None
+
+    def _knowledge_menu(self, position) -> None:
+        item = self.knowledge_list.itemAt(position)
+        if not item:
+            return
+        self.knowledge_list.setCurrentItem(item)
+        record = self._selected_knowledge_record()
+        if not record:
+            return
+        menu = QMenu(self)
+        review = menu.addAction("标记为需要复核")
+        current = menu.addAction("确认当前有效")
+        stale = menu.addAction("标记为可能过期")
+        archived = menu.addAction("归档")
+        menu.addSeparator()
+        relation = menu.addAction("建立知识关系…")
+        menu.addSeparator()
+        delete = menu.addAction("删除正式知识…")
+        chosen = menu.exec(self.knowledge_list.mapToGlobal(position))
+        if chosen == review:
+            self.set_selected_knowledge_status("needs-review")
+        elif chosen == current:
+            self.set_selected_knowledge_status("current")
+        elif chosen == stale:
+            self.set_selected_knowledge_status("stale")
+        elif chosen == archived:
+            self.set_selected_knowledge_status("archived")
+        elif chosen == relation:
+            self.relate_selected_knowledge()
+        elif chosen == delete:
+            self.delete_selected_knowledge()
+
+    def set_selected_knowledge_status(self, status: str) -> None:
+        record = self._selected_knowledge_record()
+        if not record:
+            return
+        try:
+            self.controller.update_knowledge_item(str(record["id"]), status=status)
+        except (OSError, ValueError) as exc:
+            self._operation_error("状态更新失败", str(exc))
+            return
+        self.refresh_knowledge()
+        self.statusBar().showMessage(f"已标记为：{KNOWLEDGE_STATUS_LABELS.get(status, status)}", 5000)
+
+    def relate_selected_knowledge(self) -> None:
+        source = self._selected_knowledge_record()
+        if not source:
+            return
+        candidates = [
+            self.knowledge_list.item(index).data(Qt.UserRole)
+            for index in range(self.knowledge_list.count())
+            if self.knowledge_list.item(index) is not self.knowledge_list.currentItem()
+            and isinstance(self.knowledge_list.item(index).data(Qt.UserRole), dict)
+        ]
+        if not candidates:
+            QMessageBox.information(self, "没有可关联的知识", "至少需要两条正式知识才能建立关系。")
+            return
+        labels = [
+            f"{KNOWLEDGE_TYPE_LABELS.get(str(value.get('item_type')), str(value.get('item_type')))} · {value.get('title')}"
+            for value in candidates
+        ]
+        selected, accepted = QInputDialog.getItem(self, "关联其他知识", "目标知识：", labels, 0, False)
+        if not accepted:
+            return
+        target = candidates[labels.index(selected)]
+        relation_labels = {
+            "支持（supports）": "supports",
+            "扩展（extends）": "extends",
+            "冲突（contradicts）": "contradicts",
+            "取代（supersedes）": "supersedes",
+            "提出新问题（opens）": "opens",
+        }
+        relation_label, accepted = QInputDialog.getItem(
+            self, "关系类型", "当前知识与目标知识的关系：", list(relation_labels), 0, False
+        )
+        if not accepted:
+            return
+        try:
+            self.controller.create_knowledge_relation(
+                str(source["id"]), str(target["id"]), relation_labels[relation_label]
+            )
+        except (OSError, ValueError) as exc:
+            self._operation_error("知识关联失败", str(exc))
+            return
+        self.refresh_knowledge()
+        self.statusBar().showMessage("知识关系已建立", 5000)
+
+    def delete_selected_knowledge(self) -> None:
+        record = self._selected_knowledge_record()
+        if not record:
+            return
+        choice = QMessageBox.question(
+            self,
+            "删除正式知识",
+            f"确定将“{record.get('title') or '未命名知识'}”及其关系移到知识回收站吗？\n\n"
+            "之后可以从回收站完整恢复；原始资料不会被删除。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        try:
+            self.controller.delete_knowledge_item(str(record["id"]))
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._operation_error("删除失败", str(exc))
+            return
+        self.refresh_knowledge()
+        self.preview.clear()
+        self.statusBar().showMessage("已移到知识回收站，可随时恢复", 6000)
+
+    @staticmethod
+    def _answer_summary(markdown: str) -> str:
+        paragraphs = []
+        for value in markdown.split("\n\n"):
+            cleaned = value.strip().lstrip("#*- ").strip()
+            if cleaned and not cleaned.startswith("["):
+                paragraphs.append(cleaned.replace("\n", " "))
+            if len(" ".join(paragraphs)) >= 240:
+                break
+        return " ".join(paragraphs)[:320]
+
+    def capture_last_answer_as_knowledge(self) -> None:
+        markdown = self.last_answer_markdown.strip()
+        if not markdown:
+            QMessageBox.information(self, "没有可沉淀的回答", "请先完成一次问答，再将有复用价值的内容沉淀为知识。")
+            return
+        question = self.last_question.strip()
+        suggested_title = question[:100] if question else self._answer_summary(markdown)[:100]
+        evidence_document_ids: list[str] = []
+        for value in self.evidence_by_id.values():
+            if isinstance(value, dict):
+                source = value.get("source") if isinstance(value.get("source"), dict) else {}
+                document_id = value.get("document_id") or source.get("document_id")
+            else:
+                source = getattr(value, "source", None)
+                document_id = getattr(value, "document_id", None) or getattr(source, "document_id", None)
+            if document_id and str(document_id) not in evidence_document_ids:
+                evidence_document_ids.append(str(document_id))
+        dialog = KnowledgeCaptureDialog(
+            suggested_title=suggested_title or "AI静静知识",
+            suggested_summary=self._answer_summary(markdown),
+            evidence_count=len(evidence_document_ids),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            record = self.controller.capture_answer_as_knowledge(
+                markdown=markdown,
+                question=question,
+                conversation_id=self.conversation_id,
+                answer_id=self.last_answer_id,
+                evidence_document_ids=evidence_document_ids,
+                **dialog.values(),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._operation_error("知识沉淀失败", str(exc))
+            return
+        self.refresh_knowledge()
+        self.left_tabs.setCurrentWidget(self.knowledge_tab)
+        for index in range(self.knowledge_list.count()):
+            current = self.knowledge_list.item(index)
+            payload = current.data(Qt.UserRole)
+            if isinstance(payload, dict) and str(payload.get("id")) == str(record.get("id")):
+                self.knowledge_list.setCurrentItem(current)
+                break
+        self.statusBar().showMessage("已沉淀为正式知识，并关联当前来源证据", 7000)
+
+    def show_knowledge_health(self) -> None:
+        try:
+            report = self.controller.knowledge_health()
+        except (OSError, ValueError) as exc:
+            self._operation_error("知识体检失败", str(exc))
+            return
+        KnowledgeHealthDialog(report, self).exec()
+
+    def show_knowledge_trash(self) -> None:
+        dialog = KnowledgeTrashDialog(self.controller, self)
+        dialog.exec()
+        if dialog.restored_ids:
+            self.refresh_knowledge()
+            self.statusBar().showMessage(
+                f"已从回收站恢复 {len(dialog.restored_ids)} 条正式知识", 6000
+            )
 
     def refresh_conversations(self, _value: object = None) -> None:
         """Refresh the persisted chat list without disturbing the open chat."""
@@ -1687,6 +2475,14 @@ class MainWindow(QMainWindow):
         query = self.global_search.text().strip()
         if not query:
             return
+        operation_token = object()
+        if not self._begin_db_operation(
+            "知识库搜索",
+            operation_token,
+            requested="搜索知识库",
+        ):
+            return
+        self._search_operation_token = operation_token
         self.evidence_list.clear()
         self.preview.setMarkdown("正在执行本地混合检索……")
         document_ids, collections = self._active_scope()
@@ -1699,7 +2495,16 @@ class MainWindow(QMainWindow):
         worker = Worker(execute)
         worker.signals.result.connect(self._search_complete)
         worker.signals.error.connect(lambda message: self._operation_error("搜索失败", message))
+        worker.signals.finished.connect(
+            lambda operation_token=operation_token: self._finish_search(operation_token)
+        )
         self.thread_pool.start(worker)
+
+    def _finish_search(self, operation_token: object) -> None:
+        if self._search_operation_token is not operation_token:
+            return
+        self._search_operation_token = None
+        self._finish_db_operation(operation_token)
 
     def _search_complete(self, results) -> None:
         self.evidence_by_id.clear()
@@ -1734,6 +2539,14 @@ class MainWindow(QMainWindow):
         images = list(self._pending_images)
         if not question and not images:
             return
+        operation_token = object()
+        if not self._begin_db_operation(
+            "回答生成",
+            operation_token,
+            requested="生成回答",
+        ):
+            return
+        self._answer_operation_token = operation_token
         effective_question = question or "请仔细分析这张图片，并结合知识库说明其中的内容。"
         self.last_question = effective_question
         self.prompt.clear()
@@ -1772,11 +2585,24 @@ class MainWindow(QMainWindow):
         worker = Worker(execute)
         worker.signals.progress.connect(lambda value: self.answer_status.setText(value[1]))
         worker.signals.delta.connect(self._answer_delta)
-        worker.signals.result.connect(self._answer_complete)
-        worker.signals.error.connect(
-            lambda message: self._answer_error(message, question=question, images=images)
+        worker.signals.result.connect(
+            lambda answer, operation_token=operation_token: self._answer_complete(
+                answer, operation_token
+            )
         )
-        worker.signals.finished.connect(self._finish_answer_request)
+        worker.signals.error.connect(
+            lambda message, operation_token=operation_token: self._answer_error(
+                message,
+                question=question,
+                images=images,
+                operation_token=operation_token,
+            )
+        )
+        worker.signals.finished.connect(
+            lambda operation_token=operation_token: self._finish_answer_request(
+                operation_token
+            )
+        )
         self._answer_worker = worker
         self.thread_pool.start(worker)
 
@@ -1812,10 +2638,19 @@ class MainWindow(QMainWindow):
         self.send_button.setEnabled(True)
         self.send_button.setText("停止生成" if busy else "发送 ↗")
 
-    def _finish_answer_request(self) -> None:
+    def _finish_answer_request(self, operation_token: object | None = None) -> None:
         """Restore the composer from deterministic result/error callbacks and as a fallback."""
+        operation_token = operation_token or self._answer_operation_token
+        if (
+            operation_token is not None
+            and self._answer_operation_token is not operation_token
+        ):
+            return
         self._set_answer_busy(False)
         self._answer_worker = None
+        self._answer_operation_token = None
+        if operation_token is not None:
+            self._finish_db_operation(operation_token)
         self.prompt.setFocus(Qt.OtherFocusReason)
 
     def _selected_documents(self) -> list[dict[str, object]]:
@@ -1911,8 +2746,8 @@ class MainWindow(QMainWindow):
             )
         return rendered
 
-    def _answer_complete(self, answer) -> None:
-        self._finish_answer_request()
+    def _answer_complete(self, answer, operation_token: object | None = None) -> None:
+        self._finish_answer_request(operation_token)
         self._inflight_images = []
         self._stream_text = ""
         self.last_answer = answer
@@ -1987,8 +2822,9 @@ class MainWindow(QMainWindow):
         *,
         question: str = "",
         images: list[ImageAttachment] | None = None,
+        operation_token: object | None = None,
     ) -> None:
-        self._finish_answer_request()
+        self._finish_answer_request(operation_token)
         stopped = self._answer_cancelled.is_set() or "已停止" in message or "cancel" in message.casefold()
         if stopped:
             if self._stream_text.strip():
@@ -2343,13 +3179,30 @@ class MainWindow(QMainWindow):
         if self._watch_scan_running:
             self.statusBar().showMessage("监听文件夹扫描已在进行", 4000)
             return
+        operation_token = object()
+        if not self._begin_db_operation(
+            "监听文件夹同步",
+            operation_token,
+            requested="扫描监听文件夹",
+        ):
+            return
         self._watch_scan_running = True
+        self._watch_operation_token = operation_token
         self.statusBar().showMessage("正在增量扫描监听文件夹…")
         worker = Worker(lambda _signals: self.controller.scan_watched_folders())
         worker.signals.result.connect(self._sync_complete)
         worker.signals.error.connect(lambda message: self._operation_error("自动同步失败", message))
-        worker.signals.finished.connect(lambda: setattr(self, "_watch_scan_running", False))
+        worker.signals.finished.connect(
+            lambda operation_token=operation_token: self._finish_watch_scan(operation_token)
+        )
         self.thread_pool.start(worker)
+
+    def _finish_watch_scan(self, operation_token: object) -> None:
+        if self._watch_operation_token is not operation_token:
+            return
+        self._watch_scan_running = False
+        self._watch_operation_token = None
+        self._finish_db_operation(operation_token)
 
     def _automatic_watch_scan(self) -> None:
         if not self.controller.settings.watched_folders_enabled:
@@ -2421,6 +3274,7 @@ class MainWindow(QMainWindow):
             note = QLabel(f"已保存：{artifact['path']}")
             note.setObjectName("muted")
             layout.addWidget(note)
+            self.refresh_knowledge()
             dialog.exec()
 
         self._run_simple_background(
@@ -2428,6 +3282,162 @@ class MainWindow(QMainWindow):
             lambda: self.controller.create_artifact(
                 artifact_type, title, document_ids=ids, model_id=model_id
             ), complete,
+        )
+
+    def run_privacy_scan(self) -> None:
+        choice = QMessageBox.question(
+            self,
+            "本地隐私扫描",
+            "是否同时使用本地 OCR 检查图片中的敏感文字？\n\n"
+            "选择“否”会更快，但图片、PDF 和音视频中的隐藏内容会作为扫描局限明确列出。",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.No,
+        )
+        if choice == QMessageBox.Cancel:
+            return
+        enable_ocr = choice == QMessageBox.Yes
+        self._run_simple_background(
+            "正在本地扫描隐私风险…",
+            lambda: self.controller.privacy_scan(enable_image_ocr=enable_ocr),
+            lambda report: self._show_privacy_report(report, "隐私扫描结果"),
+        )
+
+    def _show_privacy_report(self, report: dict[str, object], title: str) -> None:
+        status_labels = {"clean": "未发现明显风险", "review": "需要人工复核", "blocked": "发现阻断风险"}
+        findings = report.get("findings") or []
+        lines = [
+            f"# {status_labels.get(str(report.get('status')), str(report.get('status') or '扫描完成'))}",
+            "",
+            f"- 已扫描文件：{int(report.get('scanned_files') or 0)}",
+            f"- 文本文件：{int(report.get('text_files_scanned') or 0)}",
+            f"- 检查图片：{int(report.get('image_files_checked') or 0)}",
+            f"- OCR 图片：{int(report.get('ocr_images_scanned') or 0)}",
+            f"- 跳过文件：{int(report.get('skipped_files') or 0)}",
+        ]
+        if findings:
+            lines.extend(["", "## 风险摘要", ""])
+            for finding in findings:
+                if not isinstance(finding, dict):
+                    continue
+                severity = {"block": "阻断", "blocked": "阻断", "review": "复核", "warning": "提醒"}.get(
+                    str(finding.get("severity")), str(finding.get("severity") or "提醒")
+                )
+                category = str(finding.get("category") or "")
+                category_label = PRIVACY_CATEGORY_LABELS.get(category)
+                if category_label is None:
+                    for prefix in ("image_ocr_", "image_metadata_"):
+                        if category.startswith(prefix):
+                            base = PRIVACY_CATEGORY_LABELS.get(category.removeprefix(prefix), "敏感信息")
+                            category_label = f"图片{'OCR 文字' if prefix == 'image_ocr_' else '元数据'}中的{base}"
+                            break
+                lines.append(
+                    f"- **{severity} · {category_label or '隐私风险'}**："
+                    f"`{finding.get('redacted_path') or '已脱敏路径'}` · "
+                    f"{finding.get('summary') or '发现需要复核的内容'}"
+                )
+        limitations = report.get("limitations") or []
+        if limitations:
+            lines.extend(["", "## 扫描局限", ""])
+            lines.extend(f"- {value}" for value in limitations)
+        lines.extend(
+            [
+                "",
+                "---",
+                "报告不会显示命中的密钥、Cookie、私人文本原文或完整绝对路径，避免扫描日志再次泄密。",
+            ]
+        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(760, 590)
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser()
+        browser.setAccessibleName("隐私扫描报告")
+        browser.setMarkdown("\n".join(lines))
+        layout.addWidget(browser, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.button(QDialogButtonBox.Close).setText("关闭")
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def create_safe_share_copy(self) -> None:
+        selected_documents = self._selected_documents()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("生成安全分享副本")
+        dialog.setMinimumWidth(650)
+        layout = QVBoxLayout(dialog)
+        intro = QLabel(
+            "系统钥匙串、模型配置、缓存、对话记录和数据库不会进入分享副本。"
+            "检测到凭据、私人信息或无法检查的内容时，生成会停止。"
+            "当前安全副本只发布通过全文件校验的 Markdown/纯文本；所有知识内容默认不勾选。"
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("muted")
+        layout.addWidget(intro)
+        include_notes = QCheckBox("包含正式知识与知识工坊 Markdown")
+        include_notes.setAccessibleName("在分享副本中包含知识笔记")
+        layout.addWidget(include_notes)
+        include_sources = QCheckBox(
+            f"包含当前选中的 {len(selected_documents)} 份原始资料（仅严格文本格式）"
+        )
+        include_sources.setEnabled(bool(selected_documents))
+        include_sources.setAccessibleName("在分享副本中包含选中的原始资料")
+        layout.addWidget(include_sources)
+        scan_images = QCheckBox("使用本地 OCR 生成图片隐私风险报告（较慢）")
+        layout.addWidget(scan_images)
+        document_policy = QLabel(
+            "PDF、Office/ODF 与图片仍会在本机深度检查并生成脱敏报告，但原始容器不会被原样复制。"
+            "这是为了阻断不可达对象、压缩尾部和隐藏元数据；音视频和其他二进制同样保持阻断。"
+        )
+        document_policy.setWordWrap(True)
+        document_policy.setObjectName("muted")
+        layout.addWidget(document_policy)
+        warning = QLabel("存在阻断级风险或无法确认安全时，系统会停止生成，而不是带风险继续导出。")
+        warning.setText(
+            "Source Notes 和已保存回答可能保留本机定位信息，默认不纳入分享。\n"
+            "密钥、令牌、私钥、邮箱、手机号和敏感路径等阻断风险永远不允许绕过。"
+        )
+        warning.setWordWrap(True)
+        warning.setObjectName("muted")
+        layout.addWidget(warning)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText("选择位置并生成")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        parent_directory = QFileDialog.getExistingDirectory(
+            self, "选择分享副本保存位置", str(Path.home() / "Desktop")
+        )
+        if not parent_directory:
+            return
+        destination = Path(parent_directory) / (
+            f"AI静静-安全分享-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
+        )
+        document_ids = [str(value["id"]) for value in selected_documents] if include_sources.isChecked() else []
+
+        def complete(report: dict[str, object]) -> None:
+            QMessageBox.information(
+                self,
+                "安全分享副本已生成",
+                f"保存位置：\n{report.get('destination') or destination}\n\n"
+                f"文件数：{report.get('file_count', 0)}\n"
+                f"清单 SHA-256：{report.get('manifest_sha256') or '已写入 manifest'}\n\n"
+                "副本没有自动上传或发送。",
+            )
+
+        self._run_simple_background(
+            "正在扫描并生成安全分享副本…",
+            lambda: self.controller.create_safe_share_copy(
+                destination,
+                include_notes=include_notes.isChecked(),
+                document_ids=document_ids,
+                scan_images_with_ocr=scan_images.isChecked(),
+                allow_review_findings=False,
+            ),
+            complete,
         )
 
     def create_backup(self) -> None:
@@ -2462,6 +3472,7 @@ class MainWindow(QMainWindow):
         self.controller.reload()
         self.new_chat()
         self.refresh_library()
+        self.refresh_knowledge()
         self.refresh_conversations()
         self.refresh_ingestion_jobs()
         self._load_models()
@@ -2508,10 +3519,30 @@ class MainWindow(QMainWindow):
 
     def show_diagnostics(self) -> None:
         report = run_diagnostics(self.controller)
+        ocr = report.get("ocr") if isinstance(report.get("ocr"), dict) else {}
+        transcription = (
+            report.get("transcription")
+            if isinstance(report.get("transcription"), dict)
+            else {}
+        )
+        route = (
+            transcription.get("route")
+            if isinstance(transcription.get("route"), dict)
+            else {}
+        )
+        route_label = (
+            f"{route.get('engine')} · {route.get('device')}/{route.get('compute_type')}"
+            if route.get("available")
+            else str(route.get("error") or "不可用")
+        )
         lines = [
             f"Python {report['python']}",
             f"SQLite FTS5：{'可用' if report['sqlite_fts5'] else '不可用'}",
             f"FFmpeg：{report['ffmpeg'] or '不可用'}",
+            f"OCR：{ocr.get('requested_engine') or '自动'} · "
+            f"RapidOCR {'可用' if ocr.get('rapidocr_available') else '不可用'} · "
+            f"PaddleOCR {'可用' if ocr.get('paddleocr_available') else '可选未安装'}",
+            f"转写路由：{route_label}",
             "",
         ]
         lines.extend(
@@ -2567,15 +3598,91 @@ class MainWindow(QMainWindow):
             "<p>Codex 和 Obsidian 均不是必需依赖。</p>",
         )
 
-    def _run_simple_background(self, label: str, function: Callable[[], object], complete: Callable[[object], None]) -> None:
-        self.statusBar().showMessage(label)
+    def _background_conflict(self, requested: str) -> bool:
+        """Report a conflict with the single database-wide operation guard."""
+
+        if self._active_db_operation_token is None:
+            return False
+        active = self._active_db_operation_label.rstrip("…。 ") or "后台操作"
+        message = f"“{active}”仍在进行，请完成后再{requested}。"
+        self.statusBar().showMessage(message, 7000)
+        QMessageBox.information(self, "后台操作进行中", message)
+        return True
+
+    def _begin_db_operation(
+        self,
+        label: str,
+        token: object,
+        *,
+        requested: str,
+    ) -> bool:
+        """Acquire the app-wide operation slot with an identity-safe token."""
+
+        if self._background_conflict(requested):
+            return False
+        self._active_db_operation_token = token
+        self._active_db_operation_label = label
+        return True
+
+    def _finish_db_operation(self, token: object) -> None:
+        """Release only the operation that acquired the current slot."""
+
+        if self._active_db_operation_token is not token:
+            return
+        self._active_db_operation_token = None
+        self._active_db_operation_label = ""
+
+    def _run_simple_background(
+        self,
+        label: str,
+        function: Callable[[], object],
+        complete: Callable[[object], None],
+    ) -> bool:
         worker = Worker(lambda _signals: function())
-        worker.signals.result.connect(complete)
-        worker.signals.error.connect(lambda message: self._operation_error("操作失败", message))
+        if not self._begin_db_operation(
+            label,
+            worker,
+            requested="启动另一项操作",
+        ):
+            return False
+
+        self.statusBar().showMessage(label)
+        self._background_worker = worker
+        self._background_operation_label = label
+        if self.centralWidget() is not None:
+            self.centralWidget().setEnabled(False)
+        self.menuBar().setEnabled(False)
+
+        def release() -> None:
+            # A result handler may immediately start a follow-up operation (for
+            # example update check -> package download).  A late finished signal
+            # from the previous worker must never unlock that newer operation.
+            if self._background_worker is not worker:
+                return
+            self._background_worker = None
+            self._background_operation_label = ""
+            self._finish_db_operation(worker)
+            if self.centralWidget() is not None:
+                self.centralWidget().setEnabled(True)
+            self.menuBar().setEnabled(True)
+
+        def on_result(value: object) -> None:
+            release()
+            complete(value)
+
+        def on_error(message: str) -> None:
+            release()
+            self._operation_error("操作失败", message)
+
+        worker.signals.result.connect(on_result)
+        worker.signals.error.connect(on_error)
+        worker.signals.finished.connect(release)
         self.thread_pool.start(worker)
+        return True
 
     def _sync_complete(self, report) -> None:
         self.refresh_library()
+        self.refresh_knowledge()
         self._refresh_status()
         self.statusBar().showMessage(f"操作完成：{report}", 12000)
 
@@ -2623,8 +3730,30 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._background_worker is not None:
+            active = self._background_operation_label.rstrip("…。 ") or "后台操作"
+            QMessageBox.information(
+                self,
+                "后台操作仍在进行",
+                f"“{active}”尚未完成。为避免数据库或备份损坏，请等待完成后再关闭应用。",
+            )
+            event.ignore()
+            return
         importing = bool(self.import_token and not self.import_token.cancelled)
         answering = self._answer_busy
+        if (
+            self._active_db_operation_token is not None
+            and not importing
+            and not answering
+        ):
+            active = self._active_db_operation_label.rstrip("…。 ") or "后台操作"
+            QMessageBox.information(
+                self,
+                "后台操作仍在进行",
+                f"“{active}”尚未完成。为避免数据库损坏，请等待完成后再关闭应用。",
+            )
+            event.ignore()
+            return
         if importing or answering:
             active = "、".join(
                 value for value, enabled in (("资料导入", importing), ("回答生成", answering)) if enabled

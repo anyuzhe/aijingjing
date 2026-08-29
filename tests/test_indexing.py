@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
+from unittest.mock import patch
 
+from media_knowledge.config import AppConfig
 from media_knowledge.documents import document_from_text
 from media_knowledge.embedding import HashEmbeddingProvider
 from media_knowledge.indexing import IndexingService
+from media_knowledge.ingestion import IngestionService
 from media_knowledge.models import ContentSegment, KnowledgeDocument, SourceReference
-from media_knowledge.storage import KnowledgeDatabase
+from media_knowledge.product import DesktopSettings, ProductPaths
+from media_knowledge.storage import KnowledgeDatabase, SQLiteVectorStore
 
 
 class CountingEmbeddingProvider(HashEmbeddingProvider):
@@ -21,6 +26,36 @@ class CountingEmbeddingProvider(HashEmbeddingProvider):
         return super().embed(texts)
 
 
+class FailingEmbeddingProvider(HashEmbeddingProvider):
+    def __init__(self) -> None:
+        super().__init__(dimensions=64, model="failing-hash")
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("simulated embedding outage")
+
+
+class FailingSQLiteVectorStore(SQLiteVectorStore):
+    """Write one vector, then fail so the surrounding transaction must undo it."""
+
+    def upsert(
+        self,
+        chunk_id: str,
+        vector: Sequence[float],
+        *,
+        provider: str,
+        model: str,
+        content_hash: str,
+    ) -> None:
+        super().upsert(
+            chunk_id,
+            vector,
+            provider=provider,
+            model=model,
+            content_hash=content_hash,
+        )
+        raise RuntimeError("simulated vector-store failure")
+
+
 class IndexingIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -31,6 +66,28 @@ class IndexingIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.database.close()
         self.temp.cleanup()
+
+    def _index_snapshot(self) -> dict[str, list[tuple[object, ...]]]:
+        queries = {
+            "documents": "SELECT * FROM documents ORDER BY id",
+            "knowledge_items": "SELECT * FROM knowledge_items ORDER BY id",
+            "chunks": "SELECT * FROM chunks ORDER BY id",
+            "source_references": "SELECT * FROM source_references ORDER BY chunk_id",
+            "collections": "SELECT * FROM collections ORDER BY id",
+            "document_collections": (
+                "SELECT * FROM document_collections ORDER BY document_id, collection_id"
+            ),
+            "tags": "SELECT * FROM tags ORDER BY id",
+            "document_tags": "SELECT * FROM document_tags ORDER BY document_id, tag_id",
+            "embeddings": "SELECT * FROM embeddings ORDER BY chunk_id",
+            "chunks_fts": (
+                "SELECT chunk_id, document_id, title, content FROM chunks_fts ORDER BY chunk_id"
+            ),
+        }
+        return {
+            name: [tuple(row) for row in self.database.connection.execute(statement).fetchall()]
+            for name, statement in queries.items()
+        }
 
     def test_duplicate_import_does_not_add_document_or_chunks(self) -> None:
         first = document_from_text("same durable knowledge", title="A", source_id="source-a")
@@ -91,6 +148,100 @@ class IndexingIntegrationTests(unittest.TestCase):
         self.assertEqual(second.embedded_chunks, 1)
         self.assertEqual(self.embedding.batches, [["New content."]])
 
+    def test_failed_embedding_leaves_new_document_completely_absent(self) -> None:
+        document = document_from_text(
+            "New content that must not become partially searchable.",
+            title="Atomic create",
+            source_id="atomic-create",
+            collections=["New collection"],
+            tags=["New tag"],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "embedding outage"):
+            IndexingService(self.database, FailingEmbeddingProvider()).index_document(document)
+
+        snapshot = self._index_snapshot()
+        self.assertEqual(snapshot, {name: [] for name in snapshot})
+
+    def test_failed_embedding_preserves_complete_previous_document_version(self) -> None:
+        original = document_from_text(
+            "The original durable evidence remains available.",
+            title="Original title",
+            source_id="atomic-update",
+            collections=["Original collection"],
+            tags=["Original tag"],
+        )
+        self.service.index_document(original)
+        before = self._index_snapshot()
+        replacement = document_from_text(
+            "Replacement content must never appear after a failed embedding.",
+            title="Replacement title",
+            source_id="atomic-update",
+            collections=["Replacement collection"],
+            tags=["Replacement tag"],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "embedding outage"):
+            IndexingService(self.database, FailingEmbeddingProvider()).index_document(replacement)
+
+        self.assertEqual(self._index_snapshot(), before)
+
+    def test_sqlite_write_failure_rolls_back_document_fts_facets_and_embedding(self) -> None:
+        document = document_from_text(
+            "A transaction failure must roll back every searchable representation.",
+            title="Transactional create",
+            source_id="transaction-create",
+            collections=["Transactional collection"],
+            tags=["Transactional tag"],
+        )
+        vector_store = FailingSQLiteVectorStore(
+            self.database,
+            provider=self.embedding.name,
+            model=self.embedding.model,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "vector-store failure"):
+            IndexingService(
+                self.database,
+                self.embedding,
+                vector_store=vector_store,
+            ).index_document(document)
+
+        snapshot = self._index_snapshot()
+        self.assertEqual(snapshot, {name: [] for name in snapshot})
+
+    def test_sqlite_write_failure_restores_complete_previous_document_version(self) -> None:
+        original = document_from_text(
+            "The committed version must survive a later transaction failure.",
+            title="Committed title",
+            source_id="transaction-update",
+            collections=["Committed collection"],
+            tags=["Committed tag"],
+        )
+        self.service.index_document(original)
+        before = self._index_snapshot()
+        replacement = document_from_text(
+            "This replacement must be rolled back with its FTS row and vector.",
+            title="Uncommitted title",
+            source_id="transaction-update",
+            collections=["Uncommitted collection"],
+            tags=["Uncommitted tag"],
+        )
+        vector_store = FailingSQLiteVectorStore(
+            self.database,
+            provider=self.embedding.name,
+            model=self.embedding.model,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "vector-store failure"):
+            IndexingService(
+                self.database,
+                self.embedding,
+                vector_store=vector_store,
+            ).index_document(replacement)
+
+        self.assertEqual(self._index_snapshot(), before)
+
     def test_delete_cascades_chunks_embeddings_facets_and_fts(self) -> None:
         document = document_from_text(
             "cascade deletion evidence", title="Delete", source_id="delete-me", collections=["C"], tags=["T"]
@@ -115,6 +266,81 @@ class IndexingIntegrationTests(unittest.TestCase):
         report = self.service.index_document(document)
         self.assertEqual(report.status, "unchanged")
         self.assertEqual(self.embedding.batches, [])
+
+    def test_same_content_with_changed_locator_or_facets_updates_document_state(self) -> None:
+        original = document_from_text(
+            "stable content",
+            title="Same source",
+            source_id="relocated-source",
+            collections=["Old collection"],
+            tags=["Old tag"],
+        )
+        original.source.local_path = "/evidence/old.txt"
+        self.service.index_document(original)
+        self.embedding.batches.clear()
+
+        relocated = document_from_text(
+            "stable content",
+            title="Same source",
+            source_id="relocated-source",
+            collections=["New collection"],
+            tags=["New tag"],
+        )
+        relocated.source.local_path = "/evidence/repaired.txt"
+        report = self.service.index_document(relocated)
+
+        self.assertEqual(report.status, "updated")
+        self.assertEqual(self.embedding.batches, [])
+        stored = self.database.get_document_by_source_id("relocated-source")
+        self.assertEqual(stored["local_path"], "/evidence/repaired.txt")
+        self.assertEqual(
+            self.database.document_facets(stored["id"]),
+            {"collections": ["New collection"], "tags": ["New tag"]},
+        )
+
+    def test_real_ingestion_does_not_leave_database_pointing_to_rolled_back_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "atomic-ingestion.md"
+            source.write_text(
+                "# 原子入库\n\nEmbedding 服务失败时，数据库不能保留指向已回滚归档证据的记录。" * 4,
+                encoding="utf-8",
+            )
+            paths = ProductPaths.resolve(root / "data")
+            settings = DesktopSettings(
+                archive_originals=True,
+                create_source_notes=False,
+                auto_synthesize_notes=False,
+                enable_cloud_vision=False,
+                embedding_provider="hash",
+                embedding_model="hash-384-v1",
+            )
+            config = AppConfig(database_path=paths.database)
+
+            with patch(
+                "media_knowledge.ingestion.service.build_embedding_provider",
+                return_value=FailingEmbeddingProvider(),
+            ):
+                summary = IngestionService(paths, config=config, settings=settings).ingest([source])
+
+            self.assertEqual(summary.failed, 1)
+            self.assertIn("embedding outage", summary.results[0].error or "")
+            with KnowledgeDatabase(paths.database) as database:
+                self.assertEqual(database.status()["documents"], 0)
+                dangling = database.connection.execute(
+                    "SELECT id, local_path FROM documents WHERE local_path IS NOT NULL"
+                ).fetchall()
+                self.assertEqual(dangling, [])
+                fts_count = database.connection.execute(
+                    "SELECT COUNT(*) FROM chunks_fts"
+                ).fetchone()[0]
+                self.assertEqual(fts_count, 0)
+            evidence_files = [
+                path
+                for path in paths.archive.rglob("*")
+                if path.is_file() and "source-packages" not in path.parts
+            ]
+            self.assertEqual(evidence_files, [])
 
 
 if __name__ == "__main__":

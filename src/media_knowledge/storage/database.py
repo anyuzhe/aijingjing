@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -9,7 +10,7 @@ from ..models import KnowledgeChunk, KnowledgeDocument, SearchFilters, SourceRef
 
 
 BASE_SCHEMA_VERSION = 8
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 class KnowledgeDatabase:
@@ -289,6 +290,7 @@ class KnowledgeDatabase:
         migrations = (
             (9, self._migrate_answer_feedback),
             (10, self._migrate_ingestion_jobs),
+            (11, self._migrate_knowledge_governance),
         )
         for version, migration in migrations:
             if version in applied:
@@ -371,6 +373,128 @@ class KnowledgeDatabase:
             "ON ingestion_job_items(job_id, status, ordinal)"
         )
 
+    def _migrate_knowledge_governance(self) -> None:
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_items (
+                id TEXT PRIMARY KEY,
+                item_type TEXT NOT NULL CHECK(item_type IN (
+                    'source', 'topic', 'entity', 'analysis', 'decision', 'output'
+                )),
+                status TEXT NOT NULL CHECK(status IN (
+                    'draft', 'current', 'needs-review', 'stale', 'archived'
+                )),
+                maturity TEXT NOT NULL CHECK(maturity IN (
+                    'unreviewed', 'indexed', 'summarized', 'compiled', 'low-value'
+                )),
+                title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+                summary TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
+                artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+                high_value INTEGER NOT NULL DEFAULT 0 CHECK(high_value IN (0, 1)),
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_knowledge_items_type_status
+                ON knowledge_items(item_type, status, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_items_maturity
+                ON knowledge_items(maturity, high_value, updated_at DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_items_source_document
+                ON knowledge_items(document_id)
+                WHERE document_id IS NOT NULL AND item_type = 'source';
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_items_output_artifact
+                ON knowledge_items(artifact_id)
+                WHERE artifact_id IS NOT NULL AND item_type = 'output';
+
+            CREATE TABLE IF NOT EXISTS knowledge_aliases (
+                item_id TEXT NOT NULL REFERENCES knowledge_items(id) ON DELETE CASCADE,
+                alias TEXT NOT NULL CHECK(length(trim(alias)) > 0),
+                normalized_alias TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(item_id, normalized_alias)
+            );
+            CREATE INDEX IF NOT EXISTS idx_knowledge_aliases_normalized
+                ON knowledge_aliases(normalized_alias, item_id);
+
+            CREATE TABLE IF NOT EXISTS knowledge_item_tags (
+                item_id TEXT NOT NULL REFERENCES knowledge_items(id) ON DELETE CASCADE,
+                tag TEXT NOT NULL CHECK(length(trim(tag)) > 0),
+                normalized_tag TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(item_id, normalized_tag)
+            );
+            CREATE INDEX IF NOT EXISTS idx_knowledge_item_tags_normalized
+                ON knowledge_item_tags(normalized_tag, item_id);
+
+            CREATE TABLE IF NOT EXISTS knowledge_relations (
+                id TEXT PRIMARY KEY,
+                source_item_id TEXT NOT NULL REFERENCES knowledge_items(id) ON DELETE CASCADE,
+                target_item_id TEXT NOT NULL REFERENCES knowledge_items(id) ON DELETE CASCADE,
+                relation_type TEXT NOT NULL CHECK(relation_type IN (
+                    'supports', 'extends', 'contradicts', 'supersedes', 'opens'
+                )),
+                summary TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK(source_item_id <> target_item_id),
+                UNIQUE(source_item_id, target_item_id, relation_type)
+            );
+            CREATE INDEX IF NOT EXISTS idx_knowledge_relations_source
+                ON knowledge_relations(source_item_id, relation_type, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_relations_target
+                ON knowledge_relations(target_item_id, relation_type, updated_at DESC);
+            """
+        )
+        now = utcnow_iso()
+        self.connection.execute(
+            """INSERT OR IGNORE INTO knowledge_items(
+                   id, item_type, status, maturity, title, summary, body,
+                   document_id, artifact_id, high_value, metadata_json, created_at, updated_at
+               )
+               SELECT 'kg:document:' || id, 'source', 'current', 'indexed', title, '', '',
+                      id, NULL, 0, '{"managed_from":"documents"}', created_at, updated_at
+               FROM documents"""
+        )
+        self.connection.execute(
+            """INSERT OR IGNORE INTO knowledge_items(
+                   id, item_type, status, maturity, title, summary, body,
+                   document_id, artifact_id, high_value, metadata_json, created_at, updated_at
+               )
+               SELECT 'kg:artifact:' || id, 'output', 'draft', 'compiled', title, '', markdown,
+                      NULL, id, 0, '{"managed_from":"artifacts"}', created_at, updated_at
+               FROM artifacts"""
+        )
+        artifact_rows = self.connection.execute(
+            "SELECT id, source_document_ids_json FROM artifacts"
+        ).fetchall()
+        for row in artifact_rows:
+            try:
+                document_ids = json.loads(row["source_document_ids_json"] or "[]")
+            except json.JSONDecodeError:
+                document_ids = []
+            for document_id in document_ids if isinstance(document_ids, list) else []:
+                source_item_id = f"kg:document:{document_id}"
+                target_item_id = f"kg:artifact:{row['id']}"
+                exists = self.connection.execute(
+                    "SELECT 1 FROM knowledge_items WHERE id=?", (source_item_id,)
+                ).fetchone()
+                if not exists:
+                    continue
+                digest = hashlib.sha256(
+                    f"{source_item_id}|{target_item_id}|supports".encode("utf-8")
+                ).hexdigest()[:24]
+                self.connection.execute(
+                    """INSERT OR IGNORE INTO knowledge_relations(
+                           id, source_item_id, target_item_id, relation_type, summary,
+                           metadata_json, created_at, updated_at
+                       ) VALUES (?, ?, ?, 'supports', '来源资料支持该输出',
+                                 '{"managed_from":"artifacts"}', ?, ?)""",
+                    (f"rel-{digest}", source_item_id, target_item_id, now, now),
+                )
+
     def get_document_by_source_id(self, source_id: str) -> sqlite3.Row | None:
         return self.connection.execute(
             "SELECT * FROM documents WHERE source_id = ?", (source_id,)
@@ -439,6 +563,30 @@ class KnowledgeDatabase:
                 source.local_path,
                 source.obsidian_path,
                 json.dumps(document.metadata, ensure_ascii=False, sort_keys=True),
+                document.created_at,
+                document.updated_at,
+            ),
+        )
+        self.connection.execute(
+            """UPDATE knowledge_items SET title=?, updated_at=?
+               WHERE document_id=? AND item_type='source' AND metadata_json=?""",
+            (
+                document.title,
+                document.updated_at,
+                document.document_id,
+                '{"managed_from":"documents"}',
+            ),
+        )
+        self.connection.execute(
+            """INSERT OR IGNORE INTO knowledge_items(
+                   id, item_type, status, maturity, title, summary, body,
+                   document_id, artifact_id, high_value, metadata_json, created_at, updated_at
+               ) VALUES (?, 'source', 'current', 'indexed', ?, '', '', ?, NULL, 0,
+                         '{"managed_from":"documents"}', ?, ?)""",
+            (
+                f"kg:document:{document.document_id}",
+                document.title,
+                document.document_id,
                 document.created_at,
                 document.updated_at,
             ),
@@ -807,6 +955,11 @@ class KnowledgeDatabase:
                 "UPDATE chunks_fts SET title=? WHERE document_id=?",
                 (clean, document_id),
             )
+            self.connection.execute(
+                """UPDATE knowledge_items SET title=?, updated_at=?
+                   WHERE document_id=? AND item_type='source'""",
+                (clean, utcnow_iso(), document_id),
+            )
         return cursor.rowcount > 0
 
     def set_document_enabled(self, document_id: str, enabled: bool) -> bool:
@@ -894,6 +1047,58 @@ class KnowledgeDatabase:
                     now,
                 ),
             )
+            output_item_id = f"kg:artifact:{artifact_id}"
+            self.connection.execute(
+                """INSERT OR IGNORE INTO knowledge_items(
+                       id, item_type, status, maturity, title, summary, body,
+                       document_id, artifact_id, high_value, metadata_json, created_at, updated_at
+                   ) VALUES (?, 'output', 'draft', 'compiled', ?, '', ?, NULL, ?, 0,
+                             '{"managed_from":"artifacts"}', ?, ?)""",
+                (output_item_id, title, markdown, artifact_id, now, now),
+            )
+            self.connection.execute(
+                """UPDATE knowledge_items SET title=?, body=?, updated_at=?
+                   WHERE artifact_id=? AND item_type='output' AND metadata_json=?""",
+                (title, markdown, now, artifact_id, '{"managed_from":"artifacts"}'),
+            )
+            self.connection.execute(
+                "DELETE FROM knowledge_relations "
+                "WHERE target_item_id=? AND metadata_json=?",
+                (output_item_id, '{"managed_from":"artifacts"}'),
+            )
+            for document_id in source_document_ids:
+                source_item_id = f"kg:document:{document_id}"
+                document = self.connection.execute(
+                    "SELECT title, created_at, updated_at FROM documents WHERE id=?",
+                    (document_id,),
+                ).fetchone()
+                if document is None:
+                    continue
+                self.connection.execute(
+                    """INSERT OR IGNORE INTO knowledge_items(
+                           id, item_type, status, maturity, title, summary, body,
+                           document_id, artifact_id, high_value, metadata_json, created_at, updated_at
+                       ) VALUES (?, 'source', 'current', 'indexed', ?, '', '', ?, NULL, 0,
+                                 '{"managed_from":"documents"}', ?, ?)""",
+                    (
+                        source_item_id,
+                        document["title"],
+                        document_id,
+                        document["created_at"],
+                        document["updated_at"],
+                    ),
+                )
+                digest = hashlib.sha256(
+                    f"{source_item_id}|{output_item_id}|supports".encode("utf-8")
+                ).hexdigest()[:24]
+                self.connection.execute(
+                    """INSERT OR IGNORE INTO knowledge_relations(
+                           id, source_item_id, target_item_id, relation_type, summary,
+                           metadata_json, created_at, updated_at
+                       ) VALUES (?, ?, ?, 'supports', '来源资料支持该输出',
+                                 '{"managed_from":"artifacts"}', ?, ?)""",
+                    (f"rel-{digest}", source_item_id, output_item_id, now, now),
+                )
 
     def list_artifacts(self) -> list[dict[str, Any]]:
         return [
@@ -1007,6 +1212,8 @@ class KnowledgeDatabase:
             "conversations", "messages", "answers", "answer_evidence", "citations",
             "answer_feedback", "annotations", "watched_folders", "artifacts",
             "ingestion_jobs", "ingestion_job_items",
+            "knowledge_items", "knowledge_aliases", "knowledge_item_tags",
+            "knowledge_relations",
         ):
             counts[table] = self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         states = {

@@ -4,6 +4,7 @@ import hashlib
 import html
 import io
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -11,18 +12,47 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+import wave
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
 
 from ..models import ContentSegment
 from ..product import DesktopSettings, ProductPaths
-from .types import CancellationToken, ExtractionResult
+from .cleanup import TemporaryCleanupRegistry
+from .ocr import OCRResult, extract_ocr
+from .transcription import (
+    TranscriptSegment,
+    TranscriptionPlan,
+    TranscriptionResult,
+    TranscriptionUnavailable,
+    transcribe_audio,
+    write_transcript_artifacts,
+)
+from .types import CancelledError, CancellationToken, ExtractionResult
 from .vision import MultimodalInterpreter
 
 
 class MissingExtractorDependency(RuntimeError):
+    pass
+
+
+class PublicDownloadLimitExceeded(ValueError):
+    """Raised when a public-platform download crosses the local safety cap."""
+
+    pass
+
+
+class PublicLiveStreamRejected(ValueError):
+    """Raised when a public URL resolves to live or not-yet-final media."""
+
+    pass
+
+
+class PublicDownloadProtocolRejected(ValueError):
+    """Raised when a selected transport cannot be monitored chunk by chunk."""
+
     pass
 
 
@@ -33,11 +63,93 @@ class ExtractionContext:
     cancellation: CancellationToken
     vision: MultimodalInterpreter | None = None
     progress: Callable[[str], None] | None = None
+    cleanup_registry: TemporaryCleanupRegistry | None = field(default=None, repr=False)
+    owned_temporary_paths: list[Path] = field(default_factory=list, repr=False)
+    cleanup_failures: list[Path] = field(default_factory=list, repr=False)
+    temporary_ownership_tokens: dict[Path, str] = field(default_factory=dict, repr=False)
 
     def message(self, value: str) -> None:
         self.cancellation.check()
         if self.progress:
             self.progress(value)
+
+    def own_temporary_path(self, path: Path) -> Path:
+        """Register a cache descendant that this context alone may clean up."""
+
+        if path.is_symlink():
+            raise ValueError("临时文件不能是符号链接")
+        candidate = path.resolve()
+        cache = self.paths.cache.resolve()
+        if candidate == cache or cache not in candidate.parents:
+            raise ValueError("临时文件必须位于当前产品缓存目录内")
+        if candidate not in self.owned_temporary_paths:
+            if self.cleanup_registry is not None:
+                token = self.cleanup_registry.register(candidate)
+                self.temporary_ownership_tokens[candidate] = token
+            self.owned_temporary_paths.append(candidate)
+        return candidate
+
+    def owns_temporary_path(self, path: Path | None) -> bool:
+        if path is None:
+            return False
+        candidate = path.resolve()
+        return any(
+            candidate == owned or owned in candidate.parents
+            for owned in self.owned_temporary_paths
+        )
+
+    def cleanup_temporary_path(self, path: Path, *, attempts: int = 3) -> None:
+        candidate = path.resolve()
+        if candidate not in self.owned_temporary_paths:
+            return
+        token = self.temporary_ownership_tokens.get(candidate)
+        if self.cleanup_registry is not None and (
+            token is None or not self.cleanup_registry.verify(candidate, token)
+        ):
+            if candidate not in self.cleanup_failures:
+                self.cleanup_failures.append(candidate)
+            raise OSError("临时清理失败：缓存目录所有权校验未通过，已拒绝删除")
+        last_error: OSError | None = None
+        for _attempt in range(max(1, attempts)):
+            try:
+                if candidate.is_dir() and not candidate.is_symlink():
+                    shutil.rmtree(candidate)
+                else:
+                    candidate.unlink(missing_ok=True)
+            except OSError as error:
+                last_error = error
+                continue
+            self.owned_temporary_paths.remove(candidate)
+            self.temporary_ownership_tokens.pop(candidate, None)
+            if candidate in self.cleanup_failures:
+                self.cleanup_failures.remove(candidate)
+            if self.cleanup_registry is not None and token is not None:
+                try:
+                    self.cleanup_registry.forget(candidate, token)
+                except OSError as error:
+                    raise OSError(
+                        "临时清理失败：登记更新未完成，将在后续自动重试"
+                    ) from error
+            return
+
+        if candidate not in self.cleanup_failures:
+            self.cleanup_failures.append(candidate)
+        raise OSError(
+            "临时清理失败：缓存目录已安全登记，已保留待重试记录，将在后续自动重试"
+        ) from last_error
+
+    def cleanup_owned_temporary_paths(self) -> None:
+        errors: list[OSError] = []
+        for path in reversed(self.owned_temporary_paths.copy()):
+            try:
+                self.cleanup_temporary_path(path)
+            except OSError as error:
+                errors.append(error)
+        if errors:
+            raise OSError(
+                f"临时清理失败：{len(errors)} 个缓存目录已安全登记，"
+                "已保留待重试记录，将在后续自动重试"
+            ) from errors[0]
 
 
 def sha256_file(path: Path) -> str:
@@ -86,6 +198,7 @@ class PDFExtractor:
         segments: list[ContentSegment] = []
         warnings: list[str] = []
         assets: list[Path] = []
+        ocr_pages: list[dict[str, object]] = []
         title = str(document.metadata.get("title") or "").strip() or path.stem
         asset_dir = context.paths.assets / "pdf" / safe_stem(path.stem)
         for index, page in enumerate(document):
@@ -103,11 +216,47 @@ class PDFExtractor:
                     assets.append(image_path)
                 except Exception as exc:
                     warnings.append(f"第 {page_number} 页预览保留失败：{type(exc).__name__}")
+            ocr_result: OCRResult | None = None
+            if image_path and len(text) < 100:
+                context.message(f"正在识别 PDF 第 {page_number} 页扫描内容")
+                ocr_result = extract_ocr(
+                    image_path,
+                    requested_engine=context.settings.ocr_engine,
+                    complex_layout=True,
+                    allow_paddle=(
+                        context.settings.ocr_complex_layout_enabled
+                        or context.settings.ocr_engine == "paddleocr"
+                    ),
+                    low_confidence_threshold=context.settings.ocr_low_confidence_threshold,
+                )
+                ocr_text = ocr_result.text.strip()
+                if ocr_text:
+                    if not text:
+                        text = ocr_text
+                    elif self._normalized_text(ocr_text) not in self._normalized_text(text):
+                        text += "\n\n[OCR 补充]\n" + ocr_text
+                if ocr_result.fallback_reasons and ocr_result.engine != "paddleocr_ppstructurev3":
+                    warnings.append(
+                        f"第 {page_number} 页复杂版面 OCR 降级："
+                        + "；".join(ocr_result.fallback_reasons)
+                    )
             if image_path and context.vision and context.vision.available:
                 try:
                     description = context.vision.describe(image_path, context=text[:3000])
+                    if ocr_result and (
+                        not ocr_result.text
+                        or (ocr_result.complex_layout and ocr_result.engine != "paddleocr_ppstructurev3")
+                    ):
+                        ocr_result.vision_fallback_used = True
                 except Exception as exc:
                     warnings.append(f"第 {page_number} 页视觉分析失败：{type(exc).__name__}")
+            elif ocr_result and not ocr_result.text:
+                ocr_result.fallback_reasons.append("未配置可用的视觉模型，无法执行视觉兜底")
+            page_metadata: dict[str, object] = {}
+            if ocr_result:
+                ocr_metadata = ocr_result.to_dict()
+                page_metadata["ocr"] = ocr_metadata
+                ocr_pages.append({"page": page_number, **ocr_metadata})
             if not text and not description:
                 warnings.append(f"第 {page_number} 页没有提取到文字；可能需要 OCR")
                 continue
@@ -120,6 +269,7 @@ class PDFExtractor:
                     description=description,
                     location={"page": page_number},
                     asset=str(image_path) if image_path else None,
+                    metadata=page_metadata,
                 )
             )
         document.close()
@@ -131,8 +281,40 @@ class PDFExtractor:
             checksum=sha256_file(path),
             warnings=warnings,
             retained_assets=assets,
-            metadata={"page_count": page_count},
+            metadata={"page_count": page_count, "ocr": self._ocr_summary(ocr_pages)},
         )
+
+    @staticmethod
+    def _normalized_text(value: str) -> str:
+        return re.sub(r"\s+", "", value).casefold()
+
+    @staticmethod
+    def _ocr_summary(pages: list[dict[str, object]]) -> dict[str, object]:
+        scores = [
+            float(line["confidence"])
+            for page in pages
+            for line in page.get("lines", [])  # type: ignore[union-attr]
+            if isinstance(line, dict) and isinstance(line.get("confidence"), (int, float))
+        ]
+        return {
+            "pages": pages,
+            "ocr_page_count": len(pages),
+            "line_count": sum(int(page.get("line_count") or 0) for page in pages),
+            "mean_confidence": round(sum(scores) / len(scores), 6) if scores else None,
+            "min_confidence": round(min(scores), 6) if scores else None,
+            "low_confidence_lines": [
+                {"page": page.get("page"), **line}
+                for page in pages
+                for line in page.get("low_confidence_lines", [])  # type: ignore[union-attr]
+                if isinstance(line, dict)
+            ],
+            "fallback_reasons": list(dict.fromkeys(
+                str(reason)
+                for page in pages
+                for reason in page.get("fallback_reasons", [])  # type: ignore[union-attr]
+                if str(reason).strip()
+            )),
+        }
 
 
 class DOCXExtractor:
@@ -348,44 +530,41 @@ class ImageExtractor:
             raise MissingExtractorDependency("图片组件 Pillow 未安装") from exc
         context.message("正在识别图片内容")
         warnings: list[str] = []
-        ocr = ""
         with Image.open(path) as image:
             metadata = {"width": image.width, "height": image.height, "format": image.format}
-            try:
-                try:
-                    from rapidocr import RapidOCR  # type: ignore
-                except ImportError:
-                    from rapidocr_onnxruntime import RapidOCR  # type: ignore
-
-                raw_result = RapidOCR()(str(path))
-                if hasattr(raw_result, "txts"):
-                    result = [[None, text] for text in (raw_result.txts or [])]
-                else:
-                    result = raw_result[0]
-                if result:
-                    ocr = "\n".join(str(item[1]).strip() for item in result if len(item) > 1 and str(item[1]).strip())
-            except (ImportError, RuntimeError, OSError, ValueError):
-                pass
-            try:
-                import pytesseract  # type: ignore
-
-                if not ocr:
-                    ocr = pytesseract.image_to_string(image, lang="chi_sim+eng").strip()
-            except (ImportError, RuntimeError, OSError):
-                if not ocr:
-                    warnings.append("OCR 不可用；已尝试多模态视觉理解")
+        ocr_result = extract_ocr(
+            path,
+            requested_engine=context.settings.ocr_engine,
+            allow_paddle=(
+                context.settings.ocr_complex_layout_enabled
+                or context.settings.ocr_engine == "paddleocr"
+            ),
+            low_confidence_threshold=context.settings.ocr_low_confidence_threshold,
+        )
+        ocr = ocr_result.text
         description = ""
         if context.vision and context.vision.available:
             try:
                 description = context.vision.describe(path, context=ocr)
+                if not ocr or (ocr_result.complex_layout and ocr_result.engine != "paddleocr_ppstructurev3"):
+                    ocr_result.vision_fallback_used = True
             except Exception as exc:
                 warnings.append(f"视觉分析失败：{type(exc).__name__}")
+        elif not ocr:
+            ocr_result.fallback_reasons.append("未配置可用的视觉模型，无法执行视觉兜底")
+        if ocr_result.fallback_reasons:
+            warnings.append("OCR 处理说明：" + "；".join(ocr_result.fallback_reasons))
         if not ocr and not description:
             raise MissingExtractorDependency("图片没有可索引文字，且未配置可用的视觉模型或 OCR")
+        ocr_metadata = ocr_result.to_dict()
+        metadata["ocr"] = ocr_metadata
         return ExtractionResult(
             title=path.stem,
             media_type="image",
-            segments=[ContentSegment("image-1", 1, "image", text=ocr, description=description, asset=str(path))],
+            segments=[ContentSegment(
+                "image-1", 1, "image", text=ocr, description=description,
+                asset=str(path), metadata={"ocr": ocr_metadata},
+            )],
             source_path=path,
             checksum=sha256_file(path),
             warnings=warnings,
@@ -405,6 +584,15 @@ def _ffmpeg_executable() -> str | None:
         return None
 
 
+def _wav_duration(path: Path) -> float:
+    try:
+        with wave.open(str(path), "rb") as audio:
+            rate = audio.getframerate()
+            return audio.getnframes() / rate if rate else 0.0
+    except (OSError, EOFError, wave.Error):
+        return 0.0
+
+
 class AudioVideoExtractor:
     audio_suffixes = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus"}
     video_suffixes = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
@@ -414,81 +602,117 @@ class AudioVideoExtractor:
         ffmpeg = _ffmpeg_executable()
         if not ffmpeg:
             raise MissingExtractorDependency("音视频组件 FFmpeg 未安装或未随应用打包")
-        try:
-            from faster_whisper import WhisperModel  # type: ignore
-        except ImportError as exc:
-            raise MissingExtractorDependency("语音识别组件 faster-whisper 未安装") from exc
         is_video = path.suffix.casefold() in self.video_suffixes
-        context.message("正在提取音轨")
-        with tempfile.TemporaryDirectory(prefix="ai-jingjing-media-") as temporary:
-            audio_path = Path(temporary) / "audio.wav"
-            process = subprocess.run(
-                [ffmpeg, "-y", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000", str(audio_path)],
-                capture_output=True,
-                timeout=30 * 60,
-            )
-            if process.returncode != 0 or not audio_path.is_file():
-                raise RuntimeError("FFmpeg 无法提取音轨")
-            context.message("正在进行语音识别")
-            model = WhisperModel(context.settings.whisper_model, device="cpu", compute_type="int8")
-            transcribed, info = model.transcribe(str(audio_path), vad_filter=True)
-            segments: list[ContentSegment] = []
-            transcript_lines: list[str] = []
-            for index, item in enumerate(transcribed, 1):
-                context.cancellation.check()
-                text = str(item.text or "").strip()
-                if not text:
-                    continue
-                transcript_lines.append(f"[{item.start:.2f}-{item.end:.2f}] {text}")
-                segments.append(
-                    ContentSegment(
-                        f"speech-{index}", item.start, "speech", text=text,
-                        location={"timestamp_start": float(item.start), "timestamp_end": float(item.end)},
-                        metadata={"language": getattr(info, "language", None)},
-                    )
+        source_checksum = sha256_file(path)
+        derived_cache = context.paths.cache / "ingestion-derived"
+        derived_cache.mkdir(parents=True, exist_ok=True)
+        artifact_root = context.own_temporary_path(
+            Path(
+                tempfile.mkdtemp(
+                    prefix=f"{source_checksum[:12]}-",
+                    dir=derived_cache,
                 )
-            transcript_path = context.paths.transcripts / f"{safe_stem(path.stem)}-{sha256_file(path)[:10]}.txt"
-            transcript_path.parent.mkdir(parents=True, exist_ok=True)
-            transcript_path.write_text("\n".join(transcript_lines), encoding="utf-8")
-            assets: list[Path] = []
-            warnings: list[str] = []
-            if is_video and context.vision and context.vision.available:
-                context.message("正在抽取视频关键帧")
-                frame_dir = context.paths.assets / "frames" / safe_stem(path.stem)
-                frame_dir.mkdir(parents=True, exist_ok=True)
-                subprocess.run(
-                    [
-                        ffmpeg, "-y", "-i", str(path), "-vf", "fps=1/60,scale=1280:-2",
-                        "-frames:v", "8", str(frame_dir / "frame-%03d.jpg"),
-                    ],
+            )
+        )
+        context.message("正在提取音轨")
+        try:
+            with tempfile.TemporaryDirectory(prefix="ai-jingjing-media-") as temporary:
+                audio_path = Path(temporary) / "audio.wav"
+                process = subprocess.run(
+                    [ffmpeg, "-y", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000", str(audio_path)],
                     capture_output=True,
                     timeout=30 * 60,
                 )
-                for frame_index, frame in enumerate(sorted(frame_dir.glob("frame-*.jpg")), 1):
-                    try:
-                        assets.append(frame)
-                        description = context.vision.describe(frame, context="视频关键帧")
-                        segments.append(
-                            ContentSegment(
-                                f"frame-{frame_index}", frame_index * 60, "image",
-                                description=description,
-                                location={"timestamp_start": float((frame_index - 1) * 60)},
-                                asset=str(frame),
-                            )
+                if process.returncode != 0 or not audio_path.is_file():
+                    raise RuntimeError("FFmpeg 无法提取音轨")
+                duration_seconds = _wav_duration(audio_path)
+                try:
+                    transcribed = transcribe_audio(
+                        audio_path,
+                        model=context.settings.whisper_model,
+                        preferred_engine=context.settings.transcription_engine,
+                        allow_cpu_fallback=context.settings.transcription_allow_cpu_fallback,
+                        duration_seconds=duration_seconds,
+                        progress=context.message,
+                        check_cancelled=context.cancellation.check,
+                    )
+                except TranscriptionUnavailable as exc:
+                    raise MissingExtractorDependency(str(exc)) from exc
+                segments: list[ContentSegment] = []
+                for index, item in enumerate(transcribed.segments, 1):
+                    context.cancellation.check()
+                    if not item.text:
+                        continue
+                    segments.append(
+                        ContentSegment(
+                            f"speech-{index}", item.start, "speech", text=item.text,
+                            location={"timestamp_start": float(item.start), "timestamp_end": float(item.end)},
+                            metadata={
+                                "language": transcribed.language,
+                                "engine": transcribed.plan.engine,
+                                "model": transcribed.plan.model,
+                                "confidence": item.confidence,
+                                "avg_logprob": item.avg_logprob,
+                            },
                         )
-                    except Exception as exc:
-                        warnings.append(f"关键帧 {frame_index} 分析失败：{type(exc).__name__}")
-        if not segments:
-            raise RuntimeError("音视频没有提取到可索引内容")
+                    )
+                transcript_basename = f"{safe_stem(path.stem)}-{source_checksum[:10]}"
+                transcript_artifacts = write_transcript_artifacts(
+                    transcribed,
+                    artifact_root / "transcript",
+                    transcript_basename,
+                    source_name=path.name,
+                )
+                transcript_path = transcript_artifacts["txt"]
+                assets: list[Path] = []
+                warnings = list(dict.fromkeys([
+                    *transcribed.plan.fallback_reasons,
+                    *transcribed.fallback_reasons,
+                ]))
+                if is_video and context.vision and context.vision.available:
+                    context.message("正在抽取视频关键帧")
+                    frame_dir = artifact_root / "frames"
+                    frame_dir.mkdir(parents=True, exist_ok=True)
+                    subprocess.run(
+                        [
+                            ffmpeg, "-y", "-i", str(path), "-vf", "fps=1/60,scale=1280:-2",
+                            "-frames:v", "8", str(frame_dir / "frame-%03d.jpg"),
+                        ],
+                        capture_output=True,
+                        timeout=30 * 60,
+                    )
+                    for frame_index, frame in enumerate(sorted(frame_dir.glob("frame-*.jpg")), 1):
+                        try:
+                            assets.append(frame)
+                            description = context.vision.describe(frame, context="视频关键帧")
+                            segments.append(
+                                ContentSegment(
+                                    f"frame-{frame_index}", frame_index * 60, "image",
+                                    description=description,
+                                    location={"timestamp_start": float((frame_index - 1) * 60)},
+                                    asset=str(frame),
+                                )
+                            )
+                        except Exception as exc:
+                            warnings.append(f"关键帧 {frame_index} 分析失败：{type(exc).__name__}")
+            if not segments:
+                raise RuntimeError("音视频没有提取到可索引内容")
+        except BaseException as error:
+            try:
+                context.cleanup_temporary_path(artifact_root)
+            except OSError as cleanup_error:
+                error.add_note(f"附加诊断：{cleanup_error}")
+            raise
         return ExtractionResult(
             title=path.stem,
             media_type="video" if is_video else "audio",
             segments=segments,
             source_path=path,
-            checksum=sha256_file(path),
+            checksum=source_checksum,
             warnings=warnings,
             retained_assets=assets,
             transcript_path=transcript_path,
+            metadata={"transcription": transcribed.metadata()},
         )
 
 
@@ -713,30 +937,34 @@ class DirectMediaURLExtractor:
         headers = {"User-Agent": "Mozilla/5.0 AI-Jingjing/1.0", **(request_headers or {})}
         request = urllib.request.Request(media_url, headers=headers)
         context.message("正在下载远程音视频")
-        with urllib.request.urlopen(request, timeout=90) as response:
-            content_type = str(response.headers.get_content_type() or "").casefold()
-            declared_length = response.headers.get("Content-Length")
-            if declared_length:
-                try:
-                    if int(declared_length) > self.max_download_bytes:
-                        raise ValueError("远程音视频超过 2GB 安全限制，请先下载后再导入")
-                except ValueError as exc:
-                    if "超过" in str(exc):
-                        raise
-            suffix = Path(parsed.path).suffix.casefold()
-            if suffix not in self.media_suffixes:
-                suffix = self.content_type_suffixes.get(content_type, "")
-            if not (content_type.startswith(("audio/", "video/")) or suffix in self.media_suffixes):
-                raise ValueError("该地址不是可直接下载的音视频链接")
-            if suffix not in self.media_suffixes:
-                suffix = ".mp4" if content_type.startswith("video/") else ".m4a"
-            source_stem = safe_stem(title or Path(parsed.path).stem or "远程音视频")
-            identity = hashlib.sha256(original_uri.encode("utf-8")).hexdigest()[:12]
-            destination = context.paths.cache / "remote-media" / f"{source_stem}-{identity}{suffix}"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            temporary = destination.with_suffix(destination.suffix + ".part")
-            downloaded = 0
-            try:
+        identity = hashlib.sha256(original_uri.encode("utf-8")).hexdigest()[:16]
+        cache = context.paths.cache / "remote-media"
+        cache.mkdir(parents=True, exist_ok=True)
+        directory = context.own_temporary_path(
+            Path(tempfile.mkdtemp(prefix=f"{identity}-", dir=cache))
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response:
+                content_type = str(response.headers.get_content_type() or "").casefold()
+                declared_length = response.headers.get("Content-Length")
+                if declared_length:
+                    try:
+                        if int(declared_length) > self.max_download_bytes:
+                            raise ValueError("远程音视频超过 2GB 安全限制，请先下载后再导入")
+                    except ValueError as exc:
+                        if "超过" in str(exc):
+                            raise
+                suffix = Path(parsed.path).suffix.casefold()
+                if suffix not in self.media_suffixes:
+                    suffix = self.content_type_suffixes.get(content_type, "")
+                if not (content_type.startswith(("audio/", "video/")) or suffix in self.media_suffixes):
+                    raise ValueError("该地址不是可直接下载的音视频链接")
+                if suffix not in self.media_suffixes:
+                    suffix = ".mp4" if content_type.startswith("video/") else ".m4a"
+                source_stem = safe_stem(title or Path(parsed.path).stem or "远程音视频")
+                destination = directory / f"{source_stem}{suffix}"
+                temporary = destination.with_suffix(destination.suffix + ".part")
+                downloaded = 0
                 with temporary.open("wb") as handle:
                     while block := response.read(1024 * 1024):
                         context.cancellation.check()
@@ -745,20 +973,607 @@ class DirectMediaURLExtractor:
                             raise ValueError("远程音视频超过 2GB 安全限制，请先下载后再导入")
                         handle.write(block)
                 temporary.replace(destination)
-            except Exception:
-                temporary.unlink(missing_ok=True)
-                raise
-        extracted = AudioVideoExtractor().extract(destination, context)
-        extracted.title = title or extracted.title
-        extracted.original_uri = original_uri
-        extracted.metadata.update(
-            {
-                "remote_media": True,
-                "remote_content_type": content_type,
-                "remote_download_bytes": downloaded,
-                **(metadata or {}),
-            }
+            extracted = AudioVideoExtractor().extract(destination, context)
+            extracted.source_path = destination
+            extracted.title = title or extracted.title
+            extracted.original_uri = original_uri
+            extracted.metadata.update(
+                {
+                    "remote_media": True,
+                    "remote_content_type": content_type,
+                    "remote_download_bytes": downloaded,
+                    "temporary_source_owned_by": "ExtractionContext",
+                    "temporary_source_identity": identity,
+                    "source_media_bytes": destination.stat().st_size,
+                    **(metadata or {}),
+                }
+            )
+            return extracted
+        except BaseException as error:
+            try:
+                context.cleanup_temporary_path(directory)
+            except OSError as cleanup_error:
+                error.add_note(f"附加诊断：{cleanup_error}")
+            raise
+
+
+class _QuietYTDLPLogger:
+    """Discard third-party logs so signed CDN URLs or credentials cannot leak."""
+
+    def debug(self, _message: str) -> None:
+        pass
+
+    def warning(self, _message: str) -> None:
+        pass
+
+    def error(self, _message: str) -> None:
+        pass
+
+
+def _youtube_dl_class():
+    try:
+        from yt_dlp import YoutubeDL  # type: ignore
+    except ImportError as exc:
+        raise MissingExtractorDependency(
+            "公开视频平台连接器 yt-dlp 未安装；请安装 media 可选组件，"
+            "或先把公开媒体保存为本地文件后再导入"
+        ) from exc
+    return YoutubeDL
+
+
+def _subtitle_seconds(value: str) -> float | None:
+    match = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{2})[,.](\d{3})", value.strip())
+    if not match:
+        return None
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2))
+    seconds = int(match.group(3))
+    milliseconds = int(match.group(4))
+    if minutes >= 60 or seconds >= 60:
+        return None
+    return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
+
+
+def _parse_subtitle_file(path: Path) -> list[TranscriptSegment]:
+    """Parse VTT/SRT without executing styles, HTML, or embedded metadata."""
+
+    raw = path.read_text(encoding="utf-8-sig", errors="replace")
+    blocks = re.split(r"\n\s*\n", raw.replace("\r\n", "\n").replace("\r", "\n"))
+    segments: list[TranscriptSegment] = []
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines or lines[0].upper().startswith(("WEBVTT", "NOTE", "STYLE", "REGION")):
+            continue
+        timing_index = next((index for index, line in enumerate(lines[:3]) if "-->" in line), None)
+        if timing_index is None:
+            continue
+        timing = lines[timing_index].split("-->", 1)
+        start = _subtitle_seconds(timing[0].strip())
+        end_token = timing[1].strip().split()[0] if timing[1].strip() else ""
+        end = _subtitle_seconds(end_token)
+        if start is None or end is None:
+            continue
+        text = "\n".join(lines[timing_index + 1 :])
+        text = html.unescape(re.sub(r"<[^>]{0,500}>", "", text)).replace("\x00", "").strip()
+        if segments and segments[-1].text == text and start <= segments[-1].end + 0.25:
+            previous = segments[-1]
+            segments[-1] = TranscriptSegment(previous.start, max(previous.end, end), text)
+        else:
+            segments.append(TranscriptSegment(start, end, text))
+    return segments
+
+
+class PublicPlatformVideoExtractor:
+    """Public-only yt-dlp connector with subtitles-first ingestion.
+
+    The connector never asks yt-dlp for browser cookies, never supplies a cookie
+    file, and explicitly disables proxies. Private/authenticated media is not
+    retried with user credentials.
+    """
+
+    host_platforms = {
+        "youtube.com": "youtube",
+        "www.youtube.com": "youtube",
+        "m.youtube.com": "youtube",
+        "youtu.be": "youtube",
+        "bilibili.com": "bilibili",
+        "www.bilibili.com": "bilibili",
+        "m.bilibili.com": "bilibili",
+        "b23.tv": "bilibili",
+        "douyin.com": "douyin",
+        "www.douyin.com": "douyin",
+        "v.douyin.com": "douyin",
+        "xiaohongshu.com": "xiaohongshu",
+        "www.xiaohongshu.com": "xiaohongshu",
+        "xhslink.com": "xiaohongshu",
+        "www.xhslink.com": "xiaohongshu",
+        "x.com": "x",
+        "www.x.com": "x",
+        "twitter.com": "x",
+        "www.twitter.com": "x",
+        "mobile.twitter.com": "x",
+    }
+    max_download_bytes = 2 * 1024 * 1024 * 1024
+
+    @classmethod
+    def supports(cls, url: str) -> bool:
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            return (
+                parsed.scheme.casefold() in {"http", "https"}
+                and parsed.hostname is not None
+                and parsed.hostname.casefold() in cls.host_platforms
+                and parsed.username is None
+                and parsed.password is None
+                and parsed.port in {None, 80, 443}
+            )
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _safe_info(raw: object) -> dict[str, object]:
+        info = raw if isinstance(raw, dict) else {}
+        entries = info.get("entries")
+        if isinstance(entries, list):
+            entries = [item for item in entries if isinstance(item, dict)]
+            if len(entries) != 1:
+                raise ValueError("一次只能导入一个公开视频，暂不支持播放列表批量下载")
+            info = entries[0]
+        return info
+
+    @staticmethod
+    def _subtitle_choice(info: dict[str, object]) -> tuple[str, bool] | None:
+        priorities = ("zh-Hans", "zh-CN", "zh-TW", "zh", "en")
+        for automatic, key in ((False, "subtitles"), (True, "automatic_captions")):
+            values = info.get(key)
+            if not isinstance(values, dict) or not values:
+                continue
+            languages = [str(item) for item in values]
+            language = next((item for item in priorities if item in languages), None)
+            if language is None:
+                language = sorted(languages)[0]
+            return language, automatic
+        return None
+
+    @staticmethod
+    def _byte_count(value: object) -> int:
+        if isinstance(value, bool) or value is None:
+            return 0
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        if not math.isfinite(number) or number <= 0:
+            return 0
+        return int(number)
+
+    @classmethod
+    def _declared_download_size(cls, info: dict[str, object]) -> int:
+        """Return the strongest size declaration exposed by yt-dlp metadata."""
+
+        top_level = max(
+            cls._byte_count(info.get("filesize")),
+            cls._byte_count(info.get("filesize_approx")),
         )
+        requested = info.get("requested_formats")
+        requested_total = 0
+        if isinstance(requested, list):
+            for item in requested:
+                if not isinstance(item, dict):
+                    continue
+                requested_total += max(
+                    cls._byte_count(item.get("filesize")),
+                    cls._byte_count(item.get("filesize_approx")),
+                )
+        return max(top_level, requested_total)
+
+    @staticmethod
+    def _downloaded_directory_bytes(directory: Path) -> int:
+        """Measure regular downloaded files without following symlinks."""
+
+        total = 0
+        try:
+            candidates = directory.rglob("*")
+            for candidate in candidates:
+                try:
+                    if candidate.is_symlink() or not candidate.is_file():
+                        continue
+                    total += candidate.stat().st_size
+                except OSError:
+                    # yt-dlp may rename fragments while a hook is running.
+                    continue
+        except OSError:
+            return total
+        return total
+
+    @staticmethod
+    def _limit_error() -> PublicDownloadLimitExceeded:
+        return PublicDownloadLimitExceeded(
+            "公开视频下载超过 2GB 安全上限，已停止并清理临时文件；"
+            "请先下载并裁剪后再导入"
+        )
+
+    def _enforce_declared_limit(self, info: dict[str, object]) -> None:
+        if self._declared_download_size(info) > self.max_download_bytes:
+            raise self._limit_error()
+
+    @staticmethod
+    def _selected_format_records(info: dict[str, object]) -> list[dict[str, object]]:
+        records = [info]
+        for key in ("requested_formats", "requested_downloads", "selected_formats"):
+            value = info.get(key)
+            if isinstance(value, dict):
+                records.append(value)
+            elif isinstance(value, list):
+                records.extend(item for item in value if isinstance(item, dict))
+        return records
+
+    @classmethod
+    def _is_live_selection(cls, info: dict[str, object]) -> bool:
+        rejected_statuses = {"is_live", "live", "is_upcoming", "upcoming", "post_live"}
+        for record in cls._selected_format_records(info):
+            if record.get("is_live") is True:
+                return True
+            if str(record.get("live_status") or "").strip().casefold() in rejected_statuses:
+                return True
+        return False
+
+    @staticmethod
+    def _live_error() -> PublicLiveStreamRejected:
+        return PublicLiveStreamRejected(
+            "为保证下载上限和内容完整性，AI静静不导入直播、即将直播或仍在生成回放的内容；"
+            "请等待回放完成，或保存为本地文件后导入"
+        )
+
+    @classmethod
+    def _enforce_not_live(cls, info: dict[str, object]) -> None:
+        if cls._is_live_selection(info):
+            raise cls._live_error()
+
+    @staticmethod
+    def _protocol_error(protocol: str) -> PublicDownloadProtocolRejected:
+        safe_protocol = re.sub(r"[^a-z0-9_+.-]", "", protocol.casefold())[:48] or "unknown"
+        return PublicDownloadProtocolRejected(
+            f"公开视频使用了不可安全监控的传输协议（{safe_protocol}）；"
+            "当前仅支持可逐块限制的 HTTP、HTTPS 和原生 DASH 分片。"
+            "HLS（m3u8）本版本不会在线下载，可先合法保存为本地文件后导入"
+        )
+
+    @classmethod
+    def _enforce_safe_protocols(cls, info: dict[str, object]) -> None:
+        allowed = {
+            "http",
+            "https",
+            "http_dash_segments",
+            "http_dash_segments_generator",
+        }
+        for record in cls._selected_format_records(info):
+            raw = str(record.get("protocol") or "").strip().casefold()
+            if not raw:
+                continue
+            protocols = [part for part in raw.split("+") if part]
+            rejected = next((part for part in protocols if part not in allowed), None)
+            if rejected:
+                raise cls._protocol_error(rejected)
+
+    def _match_filter(self, info: dict[str, object], *, incomplete: bool = False) -> None:
+        del incomplete
+        safe_info = info if isinstance(info, dict) else {}
+        self._enforce_not_live(safe_info)
+        self._enforce_safe_protocols(safe_info)
+        return None
+
+    def _progress_hook(self, context: ExtractionContext, directory: Path):
+        state = {"bucket": -1}
+
+        def hook(data: dict[str, object]) -> None:
+            context.cancellation.check()
+            reported_downloaded = self._byte_count(data.get("downloaded_bytes"))
+            reported_total = max(
+                self._byte_count(data.get("total_bytes")),
+                self._byte_count(data.get("total_bytes_estimate")),
+            )
+            on_disk = self._downloaded_directory_bytes(directory)
+            if max(reported_downloaded, reported_total, on_disk) > self.max_download_bytes:
+                raise self._limit_error()
+            status = str(data.get("status") or "")
+            if status == "downloading":
+                percent = re.sub(r"\x1b\[[0-9;]*m", "", str(data.get("_percent_str") or "")).strip()
+                try:
+                    bucket = int(float(percent.rstrip("%")) // 5)
+                except (TypeError, ValueError):
+                    bucket = 0
+                if bucket != state["bucket"]:
+                    state["bucket"] = bucket
+                    context.message(f"正在下载公开视频{f'（{percent}）' if percent else ''}")
+            elif status == "finished":
+                context.message("公开视频下载完成，正在校验")
+        return hook
+
+    def _options(self, directory: Path, context: ExtractionContext) -> dict[str, object]:
+        return {
+            "quiet": True,
+            "no_warnings": True,
+            "logger": _QuietYTDLPLogger(),
+            "noplaylist": True,
+            "restrictfilenames": True,
+            "overwrites": True,
+            "continuedl": True,
+            "proxy": "",
+            "cookiefile": None,
+            "cookiesfrombrowser": None,
+            "usenetrc": False,
+            "netrc_location": None,
+            "socket_timeout": 30,
+            "retries": 2,
+            "fragment_retries": 2,
+            "max_filesize": self.max_download_bytes,
+            "external_downloader": {
+                "default": "native",
+                "dash": "native",
+            },
+            "match_filter": self._match_filter,
+            "outtmpl": str(directory / "%(id)s.%(ext)s"),
+            "progress_hooks": [self._progress_hook(context, directory)],
+        }
+
+    @staticmethod
+    def _control_exception(
+        error: BaseException,
+    ) -> (
+        CancelledError
+        | PublicDownloadLimitExceeded
+        | PublicLiveStreamRejected
+        | PublicDownloadProtocolRejected
+        | None
+    ):
+        """Recover control-flow exceptions that yt-dlp may wrap internally."""
+
+        pending: list[BaseException] = [error]
+        visited: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in visited:
+                continue
+            visited.add(id(current))
+            if isinstance(
+                current,
+                (
+                    CancelledError,
+                    PublicDownloadLimitExceeded,
+                    PublicLiveStreamRejected,
+                    PublicDownloadProtocolRejected,
+                ),
+            ):
+                return current
+            for related in (current.__cause__, current.__context__):
+                if isinstance(related, BaseException):
+                    pending.append(related)
+            exc_info = getattr(current, "exc_info", None)
+            if (
+                isinstance(exc_info, tuple)
+                and len(exc_info) >= 2
+                and isinstance(exc_info[1], BaseException)
+            ):
+                pending.append(exc_info[1])
+        return None
+
+    def _run_ytdlp(self, url: str, options: dict[str, object], *, download: bool) -> dict[str, object]:
+        YoutubeDL = _youtube_dl_class()
+        try:
+            with YoutubeDL(options) as ydl:
+                return self._safe_info(ydl.extract_info(url, download=download))
+        except (
+            CancelledError,
+            PublicDownloadLimitExceeded,
+            PublicLiveStreamRejected,
+            PublicDownloadProtocolRejected,
+        ):
+            raise
+        except Exception as exc:
+            control = self._control_exception(exc)
+            if control is not None:
+                raise control
+            # Do not echo yt-dlp's exception because it can contain signed media
+            # URLs. The recovery path is actionable and credential-free.
+            raise RuntimeError(
+                "无法取得该平台的公开字幕或媒体。AI静静没有读取浏览器 Cookie、"
+                "没有使用代理，也不会尝试绕过登录/地区/权限限制；可先公开下载为本地文件后导入。"
+            ) from exc
+
+    @staticmethod
+    def _duration(info: dict[str, object], segments: list[TranscriptSegment]) -> float:
+        try:
+            duration = float(info.get("duration") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            duration = 0.0
+        if duration <= 0 and segments:
+            duration = max(item.end for item in segments)
+        return max(0.0, duration)
+
+    def _subtitle_result(
+        self,
+        *,
+        url: str,
+        platform: str,
+        info: dict[str, object],
+        sidecar: Path,
+        language: str,
+        automatic: bool,
+        context: ExtractionContext,
+    ) -> ExtractionResult:
+        segments = _parse_subtitle_file(sidecar)
+        if not any(item.text for item in segments):
+            raise RuntimeError("平台字幕文件为空或格式无法识别，将改用音视频转写")
+        title = str(info.get("title") or info.get("id") or platform).strip()
+        duration = self._duration(info, segments)
+        transcript = TranscriptionResult(
+            plan=TranscriptionPlan("platform-subtitle", "public-sidecar", "source", "none"),
+            language=language,
+            duration_seconds=duration,
+            segments=segments,
+        )
+        from .quality import evaluate_transcript_integrity
+
+        transcript.integrity = evaluate_transcript_integrity(
+            [item.to_dict() for item in segments], duration_seconds=duration
+        )
+        identity = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
+        base = f"{safe_stem(title)}-{identity}"
+        artifacts = write_transcript_artifacts(
+            transcript, sidecar.parent / "transcript", base, source_name=title
+        )
+        content_segments = [
+            ContentSegment(
+                f"speech-{index}", item.start, "speech", text=item.text,
+                location={"timestamp_start": item.start, "timestamp_end": item.end},
+                metadata={
+                    "language": language,
+                    "engine": "platform-subtitle",
+                    "subtitle_kind": "automatic" if automatic else "manual",
+                },
+            )
+            for index, item in enumerate(segments, 1)
+            if item.text
+        ]
+        return ExtractionResult(
+            title=title,
+            media_type="video",
+            segments=content_segments,
+            # The public subtitle is the reproducible source evidence for this
+            # branch.  Mark it as the owned source so archival never invents a
+            # page.html path that does not exist.
+            source_path=sidecar,
+            original_uri=url,
+            checksum=sha256_file(sidecar),
+            transcript_path=artifacts["txt"],
+            metadata={
+                "platform": platform,
+                "platform_id": str(info.get("id") or ""),
+                "platform_uploader": str(info.get("uploader") or ""),
+                "content_scope": "full_media_transcript",
+                "public_access_only": True,
+                "cookies_used": False,
+                "proxy_used": False,
+                "source_subtitle": str(sidecar),
+                "subtitle_kind": "automatic" if automatic else "manual",
+                "transcription": transcript.metadata(),
+            },
+        )
+
+    def extract(self, url: str, context: ExtractionContext) -> ExtractionResult:
+        if not self.supports(url):
+            raise ValueError("不是受支持的公开视频平台链接")
+        parsed = urllib.parse.urlsplit(url)
+        platform = self.host_platforms[(parsed.hostname or "").casefold()]
+        identity = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+        platform_cache = context.paths.cache / "public-platform"
+        platform_cache.mkdir(parents=True, exist_ok=True)
+        directory = context.own_temporary_path(
+            Path(tempfile.mkdtemp(prefix=f"{identity}-", dir=platform_cache))
+        )
+        try:
+            return self._extract_in_directory(
+                url=url,
+                platform=platform,
+                identity=identity,
+                directory=directory,
+                context=context,
+            )
+        except BaseException as error:
+            # Keep the original extraction/cancellation failure authoritative.
+            # A cleanup failure is recorded on the context and attached as a
+            # diagnostic note so it is neither silent nor allowed to mask it.
+            try:
+                context.cleanup_temporary_path(directory)
+            except OSError as cleanup_error:
+                error.add_note(f"附加诊断：{cleanup_error}")
+            raise
+
+    def _extract_in_directory(
+        self,
+        *,
+        url: str,
+        platform: str,
+        identity: str,
+        directory: Path,
+        context: ExtractionContext,
+    ) -> ExtractionResult:
+        context.message(f"正在读取 {platform} 公开内容信息（不使用 Cookie 或代理）")
+        probe_options = self._options(directory, context)
+        probe_options["skip_download"] = True
+        info = self._run_ytdlp(url, probe_options, download=False)
+        self._enforce_not_live(info)
+        context.cancellation.check()
+        subtitle = self._subtitle_choice(info)
+        if subtitle:
+            language, automatic = subtitle
+            context.message(f"优先下载公开{'自动' if automatic else '人工'}字幕：{language}")
+            subtitle_options = self._options(directory, context)
+            subtitle_options.update({
+                "skip_download": True,
+                "writesubtitles": not automatic,
+                "writeautomaticsub": automatic,
+                "subtitleslangs": [language],
+                "subtitlesformat": "vtt/srt/best",
+            })
+            try:
+                subtitle_info = self._run_ytdlp(url, subtitle_options, download=True)
+                self._enforce_not_live(subtitle_info or info)
+                sidecars = sorted([*directory.glob("*.vtt"), *directory.glob("*.srt")])
+                if sidecars:
+                    return self._subtitle_result(
+                        url=url,
+                        platform=platform,
+                        info=subtitle_info or info,
+                        sidecar=sidecars[0],
+                        language=language,
+                        automatic=automatic,
+                        context=context,
+                    )
+            except CancelledError:
+                raise
+            except RuntimeError:
+                context.message("公开字幕不可用，正在改用公开媒体流转写")
+
+        self._enforce_declared_limit(info)
+        self._enforce_safe_protocols(info)
+        context.message("没有可用公开字幕，正在下载公开媒体流")
+        media_options = self._options(directory, context)
+        media_options.update({"format": "bestaudio/best", "skip_download": False})
+        media_info = self._run_ytdlp(url, media_options, download=True)
+        self._enforce_not_live(media_info)
+        self._enforce_safe_protocols(media_info)
+        self._enforce_declared_limit(media_info)
+        context.cancellation.check()
+        media_files = sorted(
+            path for path in directory.iterdir()
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and path.suffix.casefold() in AudioVideoExtractor.suffixes
+            )
+        )
+        if not media_files:
+            raise RuntimeError("平台未返回可处理的公开音视频文件")
+        if media_files[0].stat().st_size > self.max_download_bytes:
+            raise self._limit_error()
+        extracted = AudioVideoExtractor().extract(media_files[0], context)
+        extracted.source_path = media_files[0]
+        extracted.title = str(media_info.get("title") or info.get("title") or extracted.title).strip()
+        extracted.original_uri = url
+        extracted.metadata.update({
+            "platform": platform,
+            "platform_id": str(media_info.get("id") or info.get("id") or ""),
+            "platform_uploader": str(media_info.get("uploader") or info.get("uploader") or ""),
+            "content_scope": "full_media",
+            "public_access_only": True,
+            "cookies_used": False,
+            "proxy_used": False,
+            "temporary_source_owned_by": "ExtractionContext",
+            "temporary_source_identity": identity,
+            "source_media_bytes": media_files[0].stat().st_size,
+        })
         return extracted
 
 
@@ -880,6 +1695,8 @@ def url_extractor_for(url: str):
         return WeixinChannelsExtractor()
     if WeixinArticleExtractor.supports(url):
         return WeixinArticleExtractor()
+    if PublicPlatformVideoExtractor.supports(url):
+        return PublicPlatformVideoExtractor()
     if DirectMediaURLExtractor.supports(url):
         return DirectMediaURLExtractor()
     return WebExtractor()

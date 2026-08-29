@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "media-knowledge"
-version = "2.1.0"
+version = "2.2.0"
 description = "AI知识库-AI静静：本地优先的多模态知识摄取与可溯源问答桌面应用"
 requires-python = ">=3.11"
 dependencies = []
@@ -25,6 +25,13 @@ documents = [
 media = [
   "faster-whisper>=1.1,<2",
   "imageio-ffmpeg>=0.5,<1",
+  "yt-dlp>=2025.1,<2027",
+]
+apple-media = [
+  "mlx-whisper>=0.4,<1",
+]
+layout-ocr = [
+  "paddleocr[doc-parser]>=3.2,<4",
 ]
 semantic = [
   "fastembed>=0.8,<1",
@@ -43,6 +50,7 @@ full = [
   "onnxruntime>=1.20,<2",
   "faster-whisper>=1.1,<2",
   "imageio-ffmpeg>=0.5,<1",
+  "yt-dlp>=2025.1,<2027",
   "fastembed>=0.8,<1",
   "PyInstaller>=6.10,<7",
 ]

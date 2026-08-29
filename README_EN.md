@@ -7,12 +7,12 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-95%20passed-2F855A" alt="95 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.1.0-4C8FBF" alt="Version 2.1.0">
+    <img src="https://img.shields.io/badge/Test-205%20passed-2F855A" alt="205 tests passed">
+    <img src="https://img.shields.io/badge/Version-2.2.0-4C8FBF" alt="Version 2.2.0">
   </p>
 </div>
 
-AI Jingjing turns PDFs, PowerPoint decks, Word files, images, audio, video, web pages, and Markdown into one searchable local knowledge base with multi-turn Q&A and precise source traceability.
+AI Jingjing turns PDFs, PowerPoint decks, Word files, images, audio, video, web pages, and Markdown into one searchable local knowledge base with multi-turn Q&A, precise source traceability, and maintainable knowledge lifecycles.
 
 See [CHANGELOG.md](CHANGELOG.md) for release changes.
 
@@ -40,6 +40,9 @@ Every supported answer can lead back to an exact PDF page, PowerPoint slide, med
 - Ingest Markdown, text, Word, PDF, PPTX, images, audio, video, and web pages.
 - Understand PDFs and presentations page by page instead of extracting text only.
 - Produce timestamped speech transcripts and optional video keyframes.
+- With the optional `apple-media` component installed, prefer MLX on Apple Silicon; prefer CUDA on NVIDIA systems; the standard bundle uses its included CPU int8 runtime and displays the actual route explicitly.
+- Preserve JSON, Markdown, TXT, SRT, and VTT transcripts together with engine, device, language, integrity metrics, and fallback reasons.
+- Ingest public YouTube, Bilibili, Douyin, Xiaohongshu, and X links using public subtitles first, then only chunk-monitored HTTP/HTTPS or native DASH media. Live, unfinished replay, and HLS transports that could fall back to an unbounded FFmpeg downloader are rejected before download with guidance to save an authorized local copy first.
 - Group related PPT/PDF/audio/video files into one `Source Package`.
 - Archive originals, web snapshots, transcripts, retained assets, and parse manifests.
 - Run the first-party Python `IngestionService` directly, with no local Codex CLI dependency.
@@ -52,11 +55,25 @@ Before a source is indexed, the application checks:
 - whether the result contains only a title, description, cover, or platform metadata;
 - PDF and presentation page coverage;
 - whether audio/video produced real speech or visual evidence;
+- OCR line coordinates, mean/minimum confidence, low-confidence lines, and complex-layout fallback reasons;
+- PP-StructureV3 Markdown tables, formulas, layout geometry, and page reading order;
+- reversed, out-of-range, abnormally overlapping, empty, or poorly covered transcript segments;
 - checksums, extracted content size, and parser warnings.
 
 A restricted video page that exposes only a cover and description is rejected instead of being stored as fake video knowledge.
 
-### 3. Local semantic retrieval
+### 3. Governed knowledge lifecycle
+
+- Map every imported document to a `source` item and every workshop artifact to an `output` item.
+- Support six formal types: source, topic, entity, analysis, decision, and output.
+- Support draft, current, needs-review, stale, and archived lifecycle states.
+- Track unreviewed, indexed, summarized, compiled, and low-value maturity levels.
+- Model `supports`, `extends`, `contradicts`, `supersedes`, and `opens` relations with bidirectional queries.
+- Promote an answer into durable knowledge with one action, write an owned Markdown note, and connect its real source evidence. AI-generated items default to `needs-review`.
+- Run health checks for orphaned items, missing provenance, empty bodies, staleness, inconsistent tags, alias collisions, and uncompiled high-value sources, with actionable recovery guidance.
+- Atomically preserve a tombstone, Markdown note, aliases, tags, and graph edges before deletion; restore the original item ID and every still-valid relation from **Knowledge → Trash** without deleting source material.
+
+### 4. Local semantic retrieval
 
 - SQLite FTS5 full-text retrieval;
 - local multilingual semantic embeddings;
@@ -68,7 +85,7 @@ A restricted video page that exposes only a cover and description is rejected in
 
 Search does not call an LLM. The first semantic search downloads an approximately 240 MB ONNX model; subsequent searches can run offline.
 
-### 4. Multi-turn, citation-grounded Q&A
+### 5. Multi-turn, citation-grounded Q&A
 
 - Continue asking follow-up questions in the same conversation.
 - Persist, search, reopen, rename, delete, and export conversations as Markdown.
@@ -89,7 +106,7 @@ Retrieved text is always serialized as untrusted evidence data. Instruction-like
 
 Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence model. Once DeepSeek is configured, the image-capable experimental `deepseek-v4-flash-vision-exp` model is selected by default. Retrieval itself remains local and model-independent.
 
-### 5. Source reading and knowledge management
+### 6. Source reading and knowledge management
 
 - Read PDF pages, images, extracted text, and media timelines inside the app.
 - Inspect every parsed chunk and its locator.
@@ -99,7 +116,7 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 - Detect duplicate content fingerprints.
 - Preserve archived originals when a searchable record is removed.
 
-### 6. Automation and knowledge workshop
+### 7. Automation and knowledge workshop
 
 - Watch one or more folders and ingest changes incrementally.
 - Persist every import batch and per-file stage, progress, error, and structured result.
@@ -109,7 +126,7 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 - Optionally sync from Obsidian or export AI Jingjing notes to a vault.
 - Generate reports, cross-source comparisons, timelines, quizzes, flashcards, and mind-map outlines from selected evidence.
 
-### 7. Local data security
+### 8. Local data security
 
 - Keep documents, chunks, conversations, answers, evidence, and citations in local SQLite.
 - Store API keys in macOS Keychain or the platform credential store when available.
@@ -118,6 +135,11 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 - Validate paths, compression ratios, size limits, hashes, SQLite integrity, and settings before creating a safety snapshot and atomically restoring data.
 - Accept only HTTPS update manifests and redirects; download packages to a temporary file and open them only after the manifest SHA-256 matches.
 - Exclude personal databases, model caches, archives, credentials, and build outputs from Git.
+- Detect keys, tokens, private keys, email addresses, phone numbers, absolute user paths, sensitive filenames, and image EXIF/GPS locally; image-text OCR is optional.
+- Return only redacted paths, categories, and line numbers—never the matched secret or full user path.
+- Build share copies from an empty-by-default selection. Governed notes, workshop outputs, and sources enter only after explicit opt-in; Source Notes and saved answers remain excluded by default because they may retain local locators.
+- Permanently exclude databases, provider settings, keyrings, caches, conversations, backups, and trash from share copies; scan both before and after copying and generate a per-file SHA-256 manifest.
+- Stop publication whenever a blocker or uninspected surface remains; there is no expert bypass. PDFs and modern Office packages still receive deep local inspection for a redacted risk report, but original PDF, Office/ODF, image, audio, and video containers are never copied verbatim into a safe share. The current publisher accepts only Markdown/text-like files that pass strict whole-file validation, closing unreachable-object, compressed-tail, and hidden-metadata channels. Raw containers will be reopened only after page/pixel reconstruction sanitization exists. The application creates a local copy only and never uploads or sends it.
 
 ## Supported inputs
 
@@ -132,6 +154,7 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 | Video | `.mp4` `.mov` `.mkv` `.webm`, etc. | FFmpeg, Whisper, keyframes | timeline and keyframe |
 | Web/media URL | `https://...` | article extraction, snapshot, or authentic media download | URL, snapshot, timestamp |
 | Weixin public article | `mp.weixin.qq.com/s/...` | dedicated title/body extraction and challenge-page blocking | article URL, body snapshot |
+| Public video platform | YouTube, Bilibili, Douyin, Xiaohongshu, X | public subtitles first; public-media transcription as fallback | original URL, subtitle, timeline |
 
 ## Architecture
 
@@ -147,7 +170,8 @@ PySide6 Desktop UI
         ├── KnowledgeDatabase (SQLite)
         │   ├── Documents / Chunks / Source References
         │   ├── FTS5 / Embeddings
-        │   └── Conversations / Evidence / Citations
+        │   ├── Conversations / Evidence / Citations
+        │   └── Governed Knowledge / Relations / Lifecycle
         │
         ├── KnowledgeRetriever
         │   ├── Semantic Vector + BM25 + RRF + Rerank
@@ -159,6 +183,8 @@ PySide6 Desktop UI
             ├── Untrusted-evidence boundary and prompt-injection defense
             └── Evidence construction, citation validation, quality explanation
 ```
+
+A local safety layer provides redacted privacy scanning, explicit-selection share copies, a second scan of copied bytes, and SHA-256 verification. It contains no network-delivery capability.
 
 ## Quick start
 
@@ -181,6 +207,19 @@ For UI and semantic-search development without all multimedia components:
 ```bash
 pip install -e '.[desktop,semantic]'
 ```
+
+Optional accelerators:
+
+```bash
+# MLX Whisper on Apple Silicon
+pip install -e '.[apple-media]'
+
+# PP-StructureV3 for tables, formulas, and multi-column scans
+# First install PaddlePaddle 3.0+ for your platform: https://www.paddlepaddle.org.cn/install/quick
+pip install -e '.[layout-ocr]'
+```
+
+The `full` extra includes the public-platform connector and a standalone faster-whisper runtime. MLX Whisper and PaddleOCR remain optional Apple Silicon acceleration and professional-layout components because of their size. `layout-ocr` includes PP-StructureV3's document-parser dependencies, while PaddlePaddle itself must match the operating system and CPU/CUDA platform. Once installed, the application automatically prefers these components, and diagnostics verify PaddleOCR, PaddleX, and PaddlePaddle together instead of reporting a shell-only installation as ready. Missing capabilities are reported in **Help → System Diagnostics** and never silently presented as success.
 
 ### Configure answer providers
 
@@ -219,7 +258,7 @@ Search and Q&A support scope options including `--collection`, `--tag`, `--media
 ```text
 AI-Jingjing/
 ├── archive/       Originals, web snapshots, and Source Packages
-├── notes/         Source Notes, saved answers, workshop artifacts
+├── notes/         Source Notes, governed knowledge, saved answers, workshop artifacts
 ├── assets/        PDF/PPT pages, images, and video keyframes
 ├── transcripts/   Audio/video transcripts
 ├── cache/models/  Local semantic-model cache
@@ -245,6 +284,8 @@ Use `AI_JINGJING_DATA_DIR` or the `--data-dir` option to select another director
 | DeepSeek/Kimi answer | Yes | question, bounded conversation context, retrieved evidence chunks, and images explicitly attached by the user |
 | DeepSeek knowledge synthesis | Yes | bounded extracted text from the current import |
 | DeepSeek Vision/Kimi visual analysis | Yes | a limited set of images selected by the ingestion policy |
+| Public-platform subtitle/media fetch | Yes | the public URL explicitly submitted by the user; no browser cookies, netrc, or proxy |
+| Local privacy scan / safe share copy | No | none; the copy is written only to the user-selected local folder |
 
 Model providers never receive the entire database, archive directory, or Obsidian vault.
 
@@ -255,7 +296,7 @@ pip install pytest
 pytest -q
 ```
 
-Version 2.1.0 includes 95 automated tests covering chunking, database migration, model selection, real streaming output, clipboard-image handling, multimodal requests, image follow-ups, adaptive context, evidence quality, prompt-injection defenses, persistent conversation history, answer feedback, resumable ingestion jobs, citations, Weixin extraction and challenge-page blocking, V1/V2 restore compatibility, secure updates, and desktop behavior.
+Version 2.2.0 includes 205 automated tests plus 40 subtests covering chunking, atomic indexing, database migrations, governed knowledge, recoverable trash, graph relations and lifecycle, health checks, structured OCR and confidence gates, MLX/CUDA/CPU transcription routing and immediate cancellation, staged subtitle/derived artifacts, public-download streaming limits, HLS/live/protocol boundaries, dual raw-evidence/parse-version archive digests, content-addressed evidence and rollback, missing-evidence repair, persistent cleanup retries, model selection, real streaming output, clipboard images and multimodal requests, adaptive context, evidence quality, prompt-injection defenses, persistent conversations, resumable ingestion, citations, fail-closed PDF/Office/image privacy inspection and safe sharing, mutually exclusive database-wide operations, backup restore, secure updates, and desktop behavior.
 
 The repository also includes a local golden-set evaluation framework for Hit Rate@K, MRR, Citation Precision, and Citation Coverage. Replace the placeholder document and chunk IDs in the example with IDs from your own library, then run `knowledge eval`; add `--retrieval-only` to evaluate retrieval without answer generation.
 
@@ -281,19 +322,20 @@ GitHub Actions runs tests on Linux, macOS, and Windows and produces unsigned mac
 
 ```text
 src/media_knowledge/
-├── desktop/       PySide6 application, controller, diagnostics, updates
-├── ingestion/     Multimodal extraction, vision, quality gate, archive
+├── desktop/       PySide6 application, controller, diagnostics, privacy sharing, updates
+├── ingestion/     Multimodal extraction, OCR, transcription, public video, quality gate, archive
 ├── chunking/      Media-aware chunking
 ├── embedding/     Local semantic and compatible embeddings
 ├── retrieval/     Vector, FTS5, fusion, reranking
 ├── qa/            Multi-turn Q&A, evidence, prompts, citations
-├── storage/       SQLite, vectors, conversations
+├── storage/       SQLite, governance, relations, vectors, conversations
 └── sync/          Obsidian and watched-folder synchronization
 ```
 
 ## Boundaries
 
 - Login-protected, DRM-protected, or anti-bot media pages are ingested only after the authentic body or media stream has been obtained.
+- The public-platform connector uses an exact hostname allowlist and never reads cookies, browser sessions, netrc, or proxies, or bypasses login, region, or permission controls.
 - AI synthesis never replaces original evidence; important pages and originals stay archived.
 - The project does not bypass access control. Import only material you are authorized to process.
 - No open-source license is included yet. Usage and redistribution remain subject to a future declaration by the repository owner.

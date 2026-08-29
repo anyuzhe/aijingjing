@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 from ..chunking import MediaAwareChunker
@@ -29,7 +30,11 @@ class IndexingService:
     def index_document(self, document: KnowledgeDocument) -> IndexReport:
         content_hash = document.content_hash()
         existing = self.database.get_document_by_source_id(document.source_id)
-        if existing and existing["content_hash"] == content_hash:
+        if (
+            existing
+            and existing["content_hash"] == content_hash
+            and self._document_state_matches(existing, document)
+        ):
             existing_chunks = self.database.get_chunks(existing["id"])
             return IndexReport(
                 document_id=existing["id"],
@@ -64,45 +69,49 @@ class IndexingService:
         removed = [row["id"] for key, row in previous.items() if key not in next_keys]
         to_embed: list[KnowledgeChunk] = []
         created = updated = unchanged = 0
+        for chunk in chunks:
+            old = previous.get(chunk.chunk_key)
+            if old and old["content_hash"] == chunk.content_hash:
+                chunk.embedding_status = old["embedding_status"]
+                chunk.created_at = old["created_at"]
+                unchanged += 1
+            else:
+                chunk.embedding_status = "pending"
+                to_embed.append(chunk)
+                if old:
+                    updated += 1
+                else:
+                    created += 1
 
+        # Embeddings are external work and may fail.  Complete that work before
+        # mutating SQLite so a provider outage cannot leave an indexed document
+        # pointing at evidence that the ingestion layer subsequently rolls back.
+        vectors = (
+            self.embedding_provider.embed([chunk.content for chunk in to_embed])
+            if to_embed
+            else []
+        )
+        if len(vectors) != len(to_embed):
+            raise RuntimeError("embedding provider returned a mismatched vector count")
+
+        # The document row, facets, chunks, source references, FTS rows and
+        # embeddings form one logical index version.  Keeping every write inside
+        # the same transaction means a storage failure restores the complete old
+        # version (or leaves no trace at all for a new document).
         with self.database.connection:
             self.database.upsert_document(document, content_hash)
             self.database.replace_facets(document_id, document.collections, document.tags)
             self.database.delete_chunks(removed)
             for chunk in chunks:
-                old = previous.get(chunk.chunk_key)
-                if old and old["content_hash"] == chunk.content_hash:
-                    chunk.embedding_status = old["embedding_status"]
-                    chunk.created_at = old["created_at"]
-                    unchanged += 1
-                else:
-                    chunk.embedding_status = "pending"
-                    to_embed.append(chunk)
-                    if old:
-                        updated += 1
-                    else:
-                        created += 1
                 self.database.upsert_chunk(chunk, document.title)
-
-        if to_embed:
-            try:
-                vectors = self.embedding_provider.embed([chunk.content for chunk in to_embed])
-                if len(vectors) != len(to_embed):
-                    raise RuntimeError("embedding provider returned a mismatched vector count")
-                with self.database.connection:
-                    for chunk, vector in zip(to_embed, vectors):
-                        self.vector_store.upsert(
-                            chunk.id,
-                            vector,
-                            provider=self.embedding_provider.name,
-                            model=self.embedding_provider.model,
-                            content_hash=chunk.content_hash,
-                        )
-            except Exception:
-                with self.database.connection:
-                    for chunk in to_embed:
-                        self.database.set_embedding_status(chunk.id, "failed")
-                raise
+            for chunk, vector in zip(to_embed, vectors):
+                self.vector_store.upsert(
+                    chunk.id,
+                    vector,
+                    provider=self.embedding_provider.name,
+                    model=self.embedding_provider.model,
+                    content_hash=chunk.content_hash,
+                )
 
         return IndexReport(
             document_id=document_id,
@@ -113,6 +122,40 @@ class IndexingService:
             unchanged_chunks=unchanged,
             deleted_chunks=len(removed),
             embedded_chunks=len(to_embed),
+        )
+
+    def _document_state_matches(self, existing, document: KnowledgeDocument) -> bool:
+        """Return true only when content and every persisted locator/facet agree."""
+
+        source = document.source
+
+        def normalized(value: object) -> object:
+            return None if value in {None, ""} else value
+
+        scalar_fields = {
+            "title": document.title,
+            "media_type": document.media_type,
+            "checksum": source.checksum,
+            "original_uri": source.original_uri,
+            "local_path": source.local_path,
+            "obsidian_path": source.obsidian_path,
+            "metadata_json": json.dumps(
+                document.metadata,
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        }
+        if any(
+            normalized(existing[key]) != normalized(value)
+            for key, value in scalar_fields.items()
+        ):
+            return False
+        facets = self.database.document_facets(str(existing["id"]))
+        return (
+            sorted(set(facets["collections"]))
+            == sorted({value.strip() for value in document.collections if value.strip()})
+            and sorted(set(facets["tags"]))
+            == sorted({value.strip() for value in document.tags if value.strip()})
         )
 
     def reindex(self) -> dict[str, int]:
