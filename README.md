@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-205%20passed-2F855A" alt="205 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.2.0-4C8FBF" alt="Version 2.2.0">
+    <img src="https://img.shields.io/badge/Test-300-2F855A" alt="300 tests">
+    <img src="https://img.shields.io/badge/Version-2.3.0-4C8FBF" alt="Version 2.3.0">
   </p>
 </div>
 
@@ -39,9 +39,14 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 - 一次选择或拖入多个文件。
 - 支持 Markdown、纯文本、Word、PDF、PPTX、图片、音频、视频、普通网页和微信公众号文章。
 - PDF 与 PPT 按页面理解，重要页面保留图像证据。
-- 音视频生成时间轴转写；视频还可抽取关键帧。
-- Apple Silicon 的正式安装包内置 MLX/Metal 加速；NVIDIA 环境优先使用 CUDA；其他环境使用内置 CPU int8，并明确展示实际路线。模型可选 `tiny / base / small / medium / large-v3`，其中 `large-v3` 是最高精度档。
-- 转写同时保存 JSON、Markdown、TXT、SRT 和 VTT，保留引擎、设备、语言、时间完整性与降级原因。
+- 音视频先执行解码预检，再原子标准化为 16 kHz、单声道、PCM16 音轨并运行本地 VAD；视频还可抽取关键帧。
+- 提供“中文高精度（Qwen3-ASR 1.7B）”“快速预览（Qwen3-ASR 0.6B）”“兼容模式（Whisper）”和自定义路线，可在 Qwen3-ASR、MLX Whisper、faster-whisper 之间明确选择与降级。
+- Apple Silicon 可使用 MLX/Metal；NVIDIA 与 CPU 环境可使用 faster-whisper CUDA/CPU int8。界面会显示实际 Provider、模型、设备和每次回退原因，用户取消不会触发回退。
+- 内置本地模型管理器可查看状态与体积、登记已有目录、复制导入、显式下载或移除应用管理的权重，并对真实模型文件执行可取消的 SHA-256 内容校验。导入和状态检查不会静默下载；安装包不包含 Qwen3-ASR、Whisper 或说话人模型权重。
+- 支持全局、知识空间和单一来源三层专业词库；词库版本、Provider、模型内容哈希和实际回退路线都会写入转写事实与检查点。
+- 可选区分多位说话人，保留匿名说话人、重叠讲话、人数范围和对齐结果，之后可人工命名、重新分配或合并。
+- `Transcript V2` 保存原始识别、校订稿、句段/词级时间戳、说话人、模型路线、回退历史和质量状态；同时继续生成 JSON、Markdown、TXT、SRT 与 VTT 产物。
+- `audio_probe`、标准化音轨、VAD、ASR、说话人分段、Transcript V2 和质量报告均有原子持久检查点；程序中断后只重跑未完成阶段，源、配置、模型或词库变化会自动失效旧检查点。
 - 公开链接支持 YouTube、B 站、抖音、小红书和 X：优先取得公开字幕，无字幕时仅下载可逐块监控的 HTTP/HTTPS 或原生 DASH 媒体；直播、未完成回放和可能退回无界 FFmpeg 下载的 HLS 会在下载前拒绝，并提示先合法保存为本地文件。
 - 同名 PPT、PDF、录音和视频自动归为同一个 `Source Package`。
 - 自动归档原件、网页快照、转写、页面资源和解析清单。
@@ -54,13 +59,18 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 - 是否取得真实正文或真实媒体流；
 - 是否只有标题、简介、封面或平台元数据；
 - PDF/PPT 页面覆盖率；
-- 音视频是否产生真实转写或画面理解；
+- 音轨能否解码，以及编码、采样率、声道、时长、音量、静音比例和削波风险；
+- VAD 是否检测到有效语音区间，音视频是否产生真实转写或画面理解；
 - OCR 行级坐标、平均/最低置信度、低分行和复杂版面降级原因；
 - PP-StructureV3 表格 Markdown、公式、版面坐标和页面阅读顺序；
 - 音视频时间段是否倒序、越界、异常重叠、首尾缺失或出现空段；
+- 是否出现重复生成、截断、静音区间幻觉、异常语速、语言/专业术语/数字单位风险；
+- 说话人数是否偏离预期，未知说话人、重叠讲话或过度碎片化是否需要人工复核；
 - 原始文件校验值、正文规模和解析告警。
 
 只开放说明和封面的受限视频链接会被明确拒绝，不会把简介伪装成视频内容入库。
+
+音视频转写为“需要复核”或“失败”时，只保存原始资料与 Transcript V2 事实，不建立 FTS 或向量索引；人工校订并批准后才会原子补建索引。AI 知识提炼是独立派生层，强制区分已确认事实、待验证推测、争议、决策和行动项，并拒绝原始资料中不存在的页码或时间戳。
 
 ### 3. 正式知识治理
 
@@ -109,6 +119,8 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 ### 6. 原文阅读与资料管理
 
 - 在应用内阅读 PDF 页面、图片、解析文本与音视频时间轴；
+- 从回答引用或转写片段直接打开内置播放器并跳转到精确时间点，播放时同步高亮当前片段，也可调整速度或用系统应用打开原文件；
+- 在转写校订器中对照只读的原始识别文字修改校订稿，填写修改原因，并命名、重新分配或合并说话人；所有变化保留审计记录，保存后重建相关索引；
 - 查看每份资料的原始知识块和定位信息；
 - 对证据添加批注并绑定到具体知识块；
 - 重命名、停用、重新启用、重新解析或移除资料；
@@ -150,8 +162,8 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 | PDF | `.pdf` | 逐页文本、扫描页 OCR、页面图像 | 页码 |
 | PowerPoint | `.pptx` | 逐页文字、备注、图片与页面结构 | 幻灯片页码 |
 | 图片 | `.png` `.jpg` `.webp` `.tiff` 等 | OCR 与可选视觉理解 | 原图与图片资源 |
-| 音频 | `.mp3` `.m4a` `.wav` `.flac` 等 | Whisper 转写 | 开始/结束时间 |
-| 视频 | `.mp4` `.mov` `.mkv` `.webm` 等 | FFmpeg、Whisper、关键帧 | 时间轴与关键帧 |
+| 音频 | `.mp3` `.m4a` `.wav` `.flac` 等 | 预检、PCM16 标准化、VAD、Qwen3-ASR/Whisper、可选说话人识别 | 句段/词级时间与说话人 |
+| 视频 | `.mp4` `.mov` `.mkv` `.webm` 等 | FFmpeg 音轨、VAD、Qwen3-ASR/Whisper、可选说话人识别与关键帧 | 时间轴、说话人与关键帧 |
 | 网页/媒体链接 | `https://...` | 正文抓取、网页快照或真实媒体流下载 | URL、快照、时间轴 |
 | 微信公众号文章 | `mp.weixin.qq.com/s/...` | 专用正文与标题提取，验证页拦截 | 文章 URL、正文快照 |
 | 公开视频平台 | YouTube、B 站、抖音、小红书、X | 公开字幕优先；无字幕时下载公开媒体并转写 | 原链接、字幕、时间轴 |
@@ -163,7 +175,9 @@ PySide6 桌面界面
         │
         ├── IngestionService
         │   ├── 文档/PDF/PPT/图片解析
-        │   ├── OCR / Whisper / FFmpeg
+        │   ├── OCR / FFmpeg / 音频预检与标准化 / VAD
+        │   ├── ASR Router (Qwen3-ASR / MLX Whisper / faster-whisper)
+        │   ├── 可选说话人识别 / Transcript V2 / 质量门禁
         │   ├── 入库真实性与完整性质检
         │   └── Source Package 归档
         │
@@ -211,21 +225,35 @@ pip install -e '.[desktop,semantic]'
 可选增强组件：
 
 ```bash
-# Apple Silicon 的 MLX Whisper 加速
+# Apple Silicon 的 Qwen3-ASR 与 MLX Whisper 运行时
 pip install -e '.[apple-media]'
+
+# 可选说话人识别运行时
+pip install -e '.[speaker]'
 
 # 复杂表格、公式和多栏扫描件的 PP-StructureV3
 # 先按平台安装 PaddlePaddle 3.0+：https://www.paddlepaddle.org.cn/install/quick
 pip install -e '.[layout-ocr]'
 ```
 
-`.[full]` 已包含公开平台连接器与可独立工作的 faster-whisper；源码开发时可用 `.[apple-media]` 增加 MLX。macOS Apple Silicon 正式包会自动包含 MLX，因此无需用户另装。PaddleOCR 仍作为专业版面组件按需安装；`layout-ocr` 已包含 PP-StructureV3 的文档解析依赖，但 PaddlePaddle 需要按 CPU/CUDA 与操作系统选择官方安装包。安装后应用会自动优先使用，诊断也会同时检查 PaddleOCR、PaddleX 与 PaddlePaddle，避免只装了外壳却误报可用。缺失组件会在“帮助 → 系统诊断”中明确显示，不会静默伪装为成功。
+`.[full]` 已包含公开平台连接器与 faster-whisper 运行时；源码开发时可用 `.[apple-media]` 增加 Qwen3-ASR/MLX Whisper 运行时，用 `.[speaker]` 增加可选说话人识别后端。macOS Apple Silicon 正式包可包含 MLX 推理运行时，但所有 ASR 与说话人模型权重都不随安装包分发。PaddleOCR 仍作为专业版面组件按需安装；`layout-ocr` 已包含 PP-StructureV3 的文档解析依赖，但 PaddlePaddle 需要按 CPU/CUDA 与操作系统选择官方安装包。缺失组件会在“帮助 → 系统诊断”中明确显示，不会静默伪装为成功。
 
 ### 配置回答模型
 
 启动应用后打开“设置 → 模型与隐私”，填写 DeepSeek 或 Kimi API Key。密钥不会显示在状态接口、诊断日志、SQLite 或备份中。
 
 不配置任何 API Key 时，入库、本地搜索和离线证据回答仍然可用。
+
+### 配置本地转写模型
+
+打开“设置 → 多媒体解析”，选择转写方案、Provider、模型、主要语言、上下文术语、词级时间戳和可选说话人数范围；可在同一页管理三层专业词库，再点击“管理本地模型…”安装或登记权重：
+
+- `Qwen3-ASR 1.7B`：中文会议、课程与专业内容的高精度档，约 2.2 GB；
+- `Qwen3-ASR 0.6B`：速度与占用优先的快速预览档，约 0.9 GB；
+- Whisper：提供 `tiny / base / small / medium / large-v3` 多档，Apple MLX 与 faster-whisper CTranslate2 权重分别管理，绝不会混用；
+- pyannote Community-1：可选本地说话人识别模型，首次取得权重前需在 Hugging Face 接受上游条款。
+
+模型管理器支持登记已有模型目录、复制导入和由用户主动发起下载。仅查看状态、启动应用或导入音视频都不会联网下载模型；缺少所选权重时会明确提示安装、登记目录或切换路线。当前音视频入口只处理已有本地文件或已合法取得的媒体，不提供麦克风采集、实时录音或实时流式转写。
 
 ## 命令行
 
@@ -260,7 +288,8 @@ AI-Jingjing/
 ├── archive/       原始资料、网页快照和 Source Packages
 ├── notes/         Source Notes、正式知识、AI 回答与知识工坊产物
 ├── assets/        PDF/PPT 页面、图片与视频关键帧
-├── transcripts/   音视频转写
+├── transcripts/   Transcript V2、字幕及兼容格式转写
+├── models/        显式管理的 ASR 与说话人模型权重
 ├── cache/models/  本地语义模型缓存
 ├── backups/       可验证备份
 ├── trash/         可恢复资料
@@ -280,6 +309,7 @@ AI-Jingjing/
 | 操作 | 是否调用云服务 | 发送内容 |
 |---|---:|---|
 | 分块、SQLite、全文检索、本地语义检索 | 否 | 无 |
+| 音频预检、VAD、本地 ASR、说话人识别、播放与校订 | 否 | 无 |
 | 本地证据回答 | 否 | 无 |
 | DeepSeek/Kimi 回答 | 是 | 问题、有限对话上下文、召回的证据块，以及用户主动附加的图片 |
 | DeepSeek 知识提炼 | 是 | 当前导入资料的有界提取文本 |
@@ -296,7 +326,7 @@ pip install pytest
 pytest -q
 ```
 
-当前版本包含 205 项自动化测试和 40 项子测试，覆盖分块、原子索引与数据库迁移、正式知识治理、可恢复知识回收站、关系与生命周期、知识体检、结构化 OCR 与置信度门禁、MLX/CUDA/CPU 转写路由和即时取消、字幕及派生产物暂存、公开视频流式大小限制、HLS/直播/协议边界、原始证据与解析版本双摘要归档、内容寻址证据与失败回滚、缺失证据修复、持久清理重试、模型选择、真实流式输出、图片粘贴与多模态请求、自适应上下文、证据质量、提示注入防护、连续对话历史、持久化导入任务、引用、失败关闭的 PDF/Office/图片隐私扫描与安全分享、后台操作互斥、备份恢复、安全更新和桌面产品行为。
+当前 2.3.0 版本包含 300 项自动化测试、42 项额外子测试（另有 1 项按可选组件条件跳过），覆盖 ASR Provider 路由、本地模型生命周期与内容校验、音频预检/标准化/VAD、持久检查点与崩溃恢复、Qwen3-ASR/Whisper 降级、三层专业词库、说话人识别、Transcript V2、延迟索引质量门禁、播放器、人工校订、证据分层知识提炼与索引桥接，以及分块、原子索引、数据库迁移、知识治理、OCR、公开视频安全、内容寻址归档、隐私分享、备份恢复和桌面产品行为。
 
 仓库还提供本地黄金集评测框架，可计算 Hit Rate@K、MRR、Citation Precision 和 Citation Coverage。先把示例中的文档 ID、知识块 ID 换成自己的入库记录，再运行 `knowledge eval`；加 `--retrieval-only` 可只评估检索。
 
@@ -322,8 +352,9 @@ GitHub Actions 会在 Linux、macOS 和 Windows 上运行测试，并生成 macO
 
 ```text
 src/media_knowledge/
-├── desktop/       PySide6 应用、控制器、诊断、隐私分享与更新
-├── ingestion/     多模态提取、OCR、转写、公开视频、质检与归档
+├── desktop/       PySide6 应用、模型管理、播放器、转写校订、诊断与更新
+├── ingestion/     多模态提取、音频管线、ASR/说话人路由、OCR、质检与归档
+├── transcripts/   Transcript V2、质量评估、校订审计与持久化
 ├── chunking/      媒体感知分块
 ├── embedding/     本地语义与兼容 Embedding
 ├── retrieval/     向量、FTS5、融合与重排
@@ -337,6 +368,7 @@ src/media_knowledge/
 - 受登录、DRM 或反爬保护的平台链接，只有在取得真实正文或媒体流后才允许入库。
 - 公共平台连接器只处理精确白名单域名，不使用 Cookie、浏览器会话、netrc 或代理，也不会绕过登录、地区或权限限制。
 - AI 提炼不能替代原始证据，重要页面和原件会继续保留。
+- 模型权重不随安装包提供；只有用户在本地模型管理器中明确操作时才会下载。当前版本不支持麦克风采集、实时录音或实时流式转写。
 - 本项目不会绕过访问控制；请仅导入你有权处理的资料。
 - 当前仓库未附带开源许可证，使用与再分发权限以仓库所有者后续声明为准。
 

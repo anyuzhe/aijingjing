@@ -1,5 +1,43 @@
 # Changelog / 更新日志
 
+## 2.3.0 — 2026-08-30
+
+### 中文
+
+- 新增面向中文音频的三档本地转写方案：`Qwen3-ASR 1.7B` 中文高精度、`Qwen3-ASR 0.6B` 快速预览，以及 Whisper 兼容模式；也可自定义 Qwen3-ASR、MLX Whisper 或 faster-whisper 路线。
+- 新增显式本地模型管理器，可查看安装状态与体积、登记已有目录、复制导入、由用户主动下载或移除应用管理的模型；模型状态检查和音视频导入不会触发静默联网下载。
+- 本地模型完整性升级为真实文件内容 SHA-256，并把模型内容标识、三层专业词库版本及实际回退路线写入转写事实和持久检查点。
+- 安装包只包含可用的推理运行时与应用代码，不携带 Qwen3-ASR、Whisper 或说话人模型权重。模型下载必须由用户在模型管理器中明确发起；受限模型仍需用户接受其上游条款。
+- 音视频转写前新增解码预检和音轨诊断，记录编码、采样率、声道、时长、音量、静音比例与削波风险；随后原子标准化为 16 kHz、单声道、PCM16，并执行本地 VAD 生成语音区间。
+- 新增 ASR Provider 路由与可追溯降级：Apple Silicon 可选 Qwen3-ASR/MLX Whisper，NVIDIA/CPU 可用 faster-whisper；每次尝试、设备、模型、回退原因与取消状态均显式记录，取消不会触发回退。
+- 转写主事实升级为 `Transcript V2`，同时保存原始识别文字、人工校订文字、句段/词级时间戳、运行配置、语言、模型、回退历史、说话人、质量状态与来源摘要，并兼容读取 V1。
+- 新增可选本地说话人识别与对齐，支持 pyannote Community-1 和 Sherpa-ONNX 路由、人数范围、匿名说话人、重叠讲话标记，以及后续人工命名、重新分配和合并。
+- 转写质量门禁新增空结果、时间倒序/越界、重复循环、截断、静音幻觉、异常语速、语言/专业术语/数字单位风险、说话人数偏差、未知说话人和碎片化检查；需要复核或失败的转写不会进入高可信问答索引。
+- 新增七阶段原子持久检查点与崩溃恢复；需要复核或失败的转写先保存事实但延迟 FTS/向量索引，人工批准后再原子补建。
+- 新增全局、知识空间和单一来源三层专业词库；AI 知识提炼严格区分事实、推测、争议、决策和行动项，并验证所有页码/时间戳来自原始资料。
+- 新增应用内音视频播放器，可从引用或转写片段跳转到精确时间点、同步高亮时间轴、切换播放速度，并在本地打开原始媒体。
+- 新增转写人工校订界面：原始识别文字保持只读，校订稿、修改原因、说话人命名/归属/合并均写入审计记录；保存后原子重建说话人感知的全文与语义索引。
+- 当前版本只处理用户选择或导入的现有音视频文件，不包含麦克风采集、实时录音或实时流式转写。
+- 回归覆盖扩展到 300 项自动化测试和 42 项额外子测试，覆盖 ASR 路由、本地模型生命周期、音频管线、断点恢复、专业词库、说话人、Transcript V2、质量门禁、播放器、校订、证据分层整理与索引桥接。
+
+### English
+
+- Added three local transcription profiles for Chinese audio: `Qwen3-ASR 1.7B` for high accuracy, `Qwen3-ASR 0.6B` for fast previews, and a Whisper compatibility profile, plus custom Qwen3-ASR, MLX Whisper, and faster-whisper routes.
+- Added an explicit local model manager for inspecting installation state and size, registering an existing directory, copying a local model into managed storage, downloading only after a user action, and removing app-managed models. Status checks and media ingestion never initiate a silent network download.
+- Upgraded model integrity to SHA-256 over actual model bytes and retained model-content identity, scoped-glossary version, and the effective fallback route in transcript facts and persistent checkpoints.
+- Application packages contain compatible inference runtimes and application code, but no Qwen3-ASR, Whisper, or diarization model weights. A download must be explicitly started in the model manager, and gated models still require acceptance of their upstream terms.
+- Added audio decode preflight and diagnostics before transcription, recording codec, sample rate, channels, duration, loudness, silence ratio, and clipping risk. Audio is then atomically normalized to 16 kHz mono PCM16 and processed by a local VAD to identify speech intervals.
+- Added an auditable ASR Provider router: Apple Silicon can use Qwen3-ASR or MLX Whisper, while NVIDIA/CPU systems can use faster-whisper. Every attempt, device, model, fallback reason, and cancellation outcome is recorded; cancellation never triggers fallback.
+- Promoted `Transcript V2` to the canonical transcript fact format, preserving immutable raw recognition, human corrections, segment/word timestamps, run configuration, language, model, fallback history, speakers, quality state, and source digest while retaining V1 read compatibility.
+- Added optional local speaker diarization and alignment through pyannote Community-1 or Sherpa-ONNX routing, speaker-count bounds, anonymized speaker IDs, overlap markers, and subsequent human rename, reassignment, and merge operations.
+- Expanded the transcript quality gate with checks for empty output, reversed/out-of-range timestamps, repeated generation loops, truncation, speech hallucinated over silence, abnormal character rate, language/technical-term/number-unit risks, speaker-count mismatch, unknown speakers, and fragmentation. Review/fail transcripts are excluded from the high-trust Q&A index.
+- Added seven-stage atomic checkpoints and crash recovery. Review/fail transcripts retain facts while FTS/vector indexing is deferred until a human approval atomically builds it.
+- Added global, knowledge-space, and source-scoped technical glossaries. Derived synthesis separates facts, inferences, disputes, decisions, and actions and validates every page/timestamp locator against source evidence.
+- Added an in-app audio/video player that seeks from citations or transcript segments to an exact timestamp, highlights the active cue, changes playback speed, and can open the original local media.
+- Added an audited transcript editor: immutable raw recognition stays read-only, while corrected text, edit reasons, speaker names, assignments, and merges are recorded. Saving atomically rebuilds the speaker-aware full-text and semantic index.
+- This release processes existing audio/video files selected or imported by the user. It does not provide microphone capture, live recording, or real-time streaming transcription.
+- Expanded regression coverage to 300 automated tests and 42 additional subtests across ASR routing, local model lifecycle, audio preparation, crash recovery, scoped glossaries, diarization, Transcript V2, quality gating, playback, correction, evidence-layered synthesis, and indexing bridges.
+
 ## 2.2.0 — 2026-08-30
 
 ### 中文

@@ -63,6 +63,7 @@ class ExtractionResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     retained_assets: list[Path] = field(default_factory=list)
     transcript_path: Path | None = None
+    transcript_data: dict[str, Any] | None = None
 
     @property
     def extracted_characters(self) -> int:

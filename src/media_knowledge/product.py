@@ -67,6 +67,16 @@ class ProductPaths:
         return self.root / "cache"
 
     @property
+    def models(self) -> Path:
+        """Application-owned model directory.
+
+        Model weights are intentionally kept outside the packaged application so
+        they can be installed, verified and removed independently.
+        """
+
+        return self.root / "models"
+
+    @property
     def backups(self) -> Path:
         return self.root / "backups"
 
@@ -89,7 +99,7 @@ class ProductPaths:
     def ensure(self) -> "ProductPaths":
         for path in (
             self.root, self.archive, self.notes, self.assets, self.transcripts,
-            self.cache, self.backups, self.trash,
+            self.cache, self.models, self.backups, self.trash,
         ):
             path.mkdir(parents=True, exist_ok=True)
         return self
@@ -197,8 +207,27 @@ class DesktopSettings:
     whisper_model: str = "small"
     transcription_engine: str = "auto"
     transcription_allow_cpu_fallback: bool = True
-    embedding_provider: str = "fastembed"
-    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    transcription_profile: str = "chinese-accuracy"
+    asr_provider: str = "qwen3-mlx"
+    asr_model: str = "Qwen3-ASR-1.7B"
+    asr_model_path: str | None = None
+    asr_model_sha256: str | None = None
+    asr_whisper_fallback_model_path: str | None = None
+    asr_whisper_fallback_model_sha256: str | None = None
+    transcription_language: str = "zh"
+    asr_knowledge_space_id: str = "本地知识库"
+    asr_context_terms: list[str] = field(default_factory=list)
+    word_timestamps: bool = True
+    diarization_enabled: bool = False
+    diarization_provider: str = "auto"
+    diarization_model_path: str | None = None
+    diarization_model_sha256: str | None = None
+    diarization_min_speakers: int = 1
+    diarization_max_speakers: int = 8
+    transcript_quality_gate: bool = True
+    model_idle_timeout_seconds: int = 300
+    embedding_provider: str = "hash"
+    embedding_model: str = "hash-384-v1"
     obsidian_vault: str | None = None
     watched_folders_enabled: bool = True
     watched_scan_minutes: int = 10
@@ -232,12 +261,77 @@ class DesktopSettings:
         settings.watched_scan_minutes = min(1440, max(1, int(settings.watched_scan_minutes)))
         settings.ocr_engine = str(settings.ocr_engine or "auto").strip().casefold()
         settings.transcription_engine = str(settings.transcription_engine or "auto").strip().casefold()
+        settings.transcription_profile = str(
+            settings.transcription_profile or "compatibility"
+        ).strip().casefold()
+        settings.asr_provider = str(settings.asr_provider or "auto").strip().casefold()
+        settings.asr_model = str(settings.asr_model or settings.whisper_model or "small").strip()
+        settings.transcription_language = str(
+            settings.transcription_language or "auto"
+        ).strip()
+        settings.diarization_provider = str(
+            settings.diarization_provider or "auto"
+        ).strip().casefold()
         if settings.ocr_engine not in {"auto", "rapidocr", "paddleocr"}:
             settings.ocr_engine = "auto"
         if settings.transcription_engine not in {"auto", "mlx", "cuda", "cpu", "faster-whisper"}:
             settings.transcription_engine = "auto"
+        if settings.transcription_profile not in {
+            "chinese-accuracy", "fast-preview", "compatibility", "custom",
+        }:
+            settings.transcription_profile = "compatibility"
+        if settings.asr_provider == "qwen3-asr-mlx":
+            settings.asr_provider = "qwen3-mlx"
+        if settings.asr_provider not in {
+            "auto", "qwen3-mlx", "mlx-whisper", "faster-whisper",
+        }:
+            settings.asr_provider = "auto"
+        if settings.diarization_provider not in {"auto", "pyannote", "sherpa", "none"}:
+            settings.diarization_provider = "auto"
+        if settings.transcription_language.casefold() not in {"auto", "zh", "en"}:
+            settings.transcription_language = "auto"
+        settings.asr_knowledge_space_id = str(
+            settings.asr_knowledge_space_id or ""
+        ).strip() or cls().asr_knowledge_space_id
+        if not isinstance(settings.asr_context_terms, list):
+            settings.asr_context_terms = []
+        settings.asr_context_terms = list(dict.fromkeys(
+            str(term).strip() for term in settings.asr_context_terms
+            if isinstance(term, str) and term.strip()
+        ))[:200]
+        for field_name in (
+            "asr_model_sha256",
+            "asr_whisper_fallback_model_sha256",
+            "diarization_model_sha256",
+        ):
+            checksum = str(getattr(settings, field_name) or "").strip().casefold()
+            setattr(
+                settings,
+                field_name,
+                checksum
+                if len(checksum) == 64
+                and all(character in "0123456789abcdef" for character in checksum)
+                else None,
+            )
+        try:
+            settings.diarization_min_speakers = max(
+                1, min(20, int(settings.diarization_min_speakers))
+            )
+            settings.diarization_max_speakers = max(
+                settings.diarization_min_speakers,
+                min(20, int(settings.diarization_max_speakers)),
+            )
+        except (TypeError, ValueError, OverflowError):
+            settings.diarization_min_speakers = 1
+            settings.diarization_max_speakers = 8
+        try:
+            settings.model_idle_timeout_seconds = max(
+                30, min(3600, int(settings.model_idle_timeout_seconds))
+            )
+        except (TypeError, ValueError, OverflowError):
+            settings.model_idle_timeout_seconds = 300
         if settings.embedding_provider not in {"fastembed", "hash"}:
-            settings.embedding_provider = "fastembed"
+            settings.embedding_provider = "hash"
         return settings
 
     def save(self, path: str | Path) -> None:

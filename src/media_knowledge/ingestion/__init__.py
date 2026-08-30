@@ -10,14 +10,29 @@ from .quality import (
 )
 from .transcription import (
     TranscriptSegment,
+    TranscriptWord,
     TranscriptionPlan,
     TranscriptionResult,
     select_transcription_plan,
 )
+from .asr import (
+    ASR_PROFILES,
+    AsrProviderError,
+    AsrProviderRegistry,
+    AsrRouter,
+    CueBuilder,
+    TranscriptionRequest,
+    create_default_registry,
+)
 
 __all__ = [
+    "ASR_PROFILES",
+    "AsrProviderError",
+    "AsrProviderRegistry",
+    "AsrRouter",
     "CancelledError",
     "CancellationToken",
+    "CueBuilder",
     "ExtractionResult",
     "IngestionResult",
     "IngestionService",
@@ -29,10 +44,13 @@ __all__ = [
     "QualityGateError",
     "QualityReport",
     "TranscriptSegment",
+    "TranscriptWord",
+    "TranscriptionRequest",
     "TranscriptionPlan",
     "TranscriptionResult",
     "evaluate_transcript_integrity",
     "evaluate_extraction",
     "extract_ocr",
     "select_transcription_plan",
+    "create_default_registry",
 ]

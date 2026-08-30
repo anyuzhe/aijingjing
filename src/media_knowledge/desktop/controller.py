@@ -15,7 +15,8 @@ from .. import __version__
 from ..answer_models import available_answer_models
 from ..config import AppConfig, KEYRING_SERVICE
 from ..ingestion import CancellationToken, IngestionService, IngestionSummary, ProgressEvent
-from ..models import SearchResult, utcnow_iso
+from ..chunking import MediaAwareChunker
+from ..models import ContentSegment, KnowledgeDocument, SearchResult, SourceReference, utcnow_iso
 from ..product import (
     DEFAULT_ANSWER_MODEL,
     LEGACY_DEFAULT_ANSWER_MODELS,
@@ -32,11 +33,14 @@ from ..storage import (
     IngestionJobRepository,
     KnowledgeDatabase,
     KnowledgeGovernanceRepository,
+    SQLiteVectorStore,
 )
+from ..transcripts import TranscriptRepository
 from ..sync import ObsidianMarkdownSync, scan_folder
 from ..indexing import IndexingService
 from .backup import create_backup as create_product_backup
 from .backup import restore_backup as restore_product_backup
+from .model_manager import LocalModelManager
 from .privacy import (
     PrivacyViolationError,
     ShareCopyOptions,
@@ -297,8 +301,26 @@ class DesktopController:
             self.migrated_database = self.paths.migrate_legacy_database()
         self.settings = DesktopSettings.load(self.paths.settings)
         self.providers = ProviderConfigStore(self.paths.providers)
+        self.local_models = LocalModelManager(self.paths)
+        settings_changed = False
+        for path_field, checksum_field in (
+            ("asr_model_path", "asr_model_sha256"),
+            (
+                "asr_whisper_fallback_model_path",
+                "asr_whisper_fallback_model_sha256",
+            ),
+            ("diarization_model_path", "diarization_model_sha256"),
+        ):
+            checksum = self.local_models.verified_content_sha256_for_path(
+                getattr(self.settings, path_field)
+            )
+            if checksum and checksum != getattr(self.settings, checksum_field):
+                setattr(self.settings, checksum_field, checksum)
+                settings_changed = True
         if self.settings.default_model in LEGACY_DEFAULT_ANSWER_MODELS:
             self.settings.default_model = DEFAULT_ANSWER_MODEL
+            settings_changed = True
+        if settings_changed:
             self.settings.save(self.paths.settings)
         with KnowledgeDatabase(self.paths.database) as database:
             self.recovered_ingestion_jobs = IngestionJobRepository(
@@ -334,6 +356,15 @@ class DesktopController:
 
     def model_choices(self) -> list[dict[str, object]]:
         return [item.to_dict() for item in available_answer_models(self.config(), codex_available=False)]
+
+    def transcription_model_statuses(self) -> list[dict[str, object]]:
+        """Return local-only model state without downloading any weights."""
+
+        return [item.to_dict() for item in self.local_models.statuses()]
+
+    def resolve_transcription_model(self, model_id: str) -> str | None:
+        path = self.local_models.resolve(model_id)
+        return str(path) if path else None
 
     def status(self) -> dict[str, object]:
         with KnowledgeDatabase(self.paths.database) as database:
@@ -1244,6 +1275,216 @@ class DesktopController:
                     except json.JSONDecodeError:
                         value[key.removesuffix("_json")] = {}
         return values
+
+    def latest_transcript(self, document_id: str) -> dict[str, object] | None:
+        """Return the latest persisted Transcript V2 and its playable local source."""
+
+        with KnowledgeDatabase(self.paths.database) as database:
+            document = database.get_document(document_id)
+            if document is None:
+                raise ValueError("资料不存在或已被移除")
+            repository = TranscriptRepository(database)
+            runs = repository.list_runs(document_id=document_id, limit=1)
+            if not runs:
+                return None
+            run = runs[0]
+            transcript = repository.get_transcript(run.id)
+            if transcript is None:
+                return None
+            media_path = str(document["local_path"] or "").strip()
+            if not media_path:
+                candidate = str(transcript.source.original_uri or "").strip()
+                if candidate and not candidate.casefold().startswith(("http://", "https://")):
+                    media_path = candidate
+            return {
+                "run": run.to_dict(),
+                "transcript": transcript.to_dict(),
+                "media_path": media_path or None,
+                "document_id": document_id,
+                "document_title": str(document["title"]),
+                "document_enabled": bool(document["enabled"]),
+            }
+
+    def refresh_transcript_index(
+        self,
+        run_id: str,
+        *,
+        affected_segment_ids: Iterable[str] = (),
+    ) -> dict[str, object]:
+        """Atomically rebuild one run's speaker-aware chunks after human edits.
+
+        The whole run is regrouped because changing a speaker can move a segment
+        across chunk boundaries.  Embeddings are computed before SQLite changes,
+        so a provider failure leaves the previous searchable version untouched.
+        """
+
+        config = self.config()
+        embedding = build_embedding_provider(config)
+        with KnowledgeDatabase(self.paths.database) as database:
+            repository = TranscriptRepository(database)
+            record = repository.get_run(run_id)
+            transcript = repository.get_transcript(run_id)
+            if record is None or transcript is None:
+                raise ValueError("转写任务不存在或事实层不完整")
+            if not record.document_id:
+                raise ValueError("该转写任务尚未关联知识库资料")
+            document_row = database.get_document(record.document_id)
+            if document_row is None:
+                raise ValueError("转写任务关联的资料已被移除")
+
+            speaker_names = {
+                speaker.id: speaker.display_name or speaker.id
+                for speaker in transcript.speakers
+            }
+            segments = [
+                ContentSegment(
+                    id=segment.id,
+                    sequence=segment.start_ms / 1000.0,
+                    modality="speech",
+                    text=segment.effective_text,
+                    location={
+                        "timestamp_start": segment.start_ms / 1000.0,
+                        "timestamp_end": segment.end_ms / 1000.0,
+                        "speaker_id": segment.speaker_id,
+                    },
+                    metadata={
+                        "language": transcript.run.language,
+                        "provider": transcript.run.provider,
+                        "model": transcript.run.model,
+                        "confidence": segment.confidence,
+                        "speaker_id": segment.speaker_id,
+                        "speaker_name": speaker_names.get(segment.speaker_id or ""),
+                        "overlap": "overlap" in segment.flags,
+                        "asr_run_id": transcript.run.id,
+                        "quality_status": transcript.quality.status,
+                        "quality_flags": list(segment.flags),
+                        "raw_text": segment.raw_text,
+                    },
+                )
+                for segment in transcript.segments
+                if segment.effective_text.strip()
+            ]
+            if not segments:
+                raise ValueError("转写中没有可建立索引的文字")
+
+            source = SourceReference(
+                source_id=str(document_row["source_id"]),
+                media_type=str(document_row["media_type"]),
+                title=str(document_row["title"]),
+                document_id=record.document_id,
+                original_uri=document_row["original_uri"],
+                local_path=document_row["local_path"],
+                obsidian_path=document_row["obsidian_path"],
+                checksum=document_row["checksum"],
+            )
+            document = KnowledgeDocument(
+                source_id=str(document_row["source_id"]),
+                title=str(document_row["title"]),
+                media_type=str(document_row["media_type"]),
+                segments=segments,
+                source=source,
+                document_id=record.document_id,
+                metadata=json.loads(document_row["metadata_json"] or "{}"),
+            )
+            rebuilt = MediaAwareChunker().chunk(document)
+            existing_rows = list(database.get_chunks(record.document_id).values())
+
+            def belongs_to_run(row: object) -> bool:
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")  # type: ignore[index]
+                except (TypeError, json.JSONDecodeError):
+                    return False
+                run_ids = metadata.get("asr_run_ids")
+                return metadata.get("asr_run_id") == run_id or (
+                    isinstance(run_ids, list) and run_id in run_ids
+                )
+
+            old_run_rows = [row for row in existing_rows if belongs_to_run(row)]
+            old_by_id = {str(row["id"]): row for row in old_run_rows}
+            base_ordinal = min(
+                (int(row["ordinal"]) for row in old_run_rows),
+                default=max((int(row["ordinal"]) for row in existing_rows), default=-1) + 1,
+            )
+            to_embed = []
+            for offset, chunk in enumerate(rebuilt):
+                chunk.ordinal = base_ordinal + offset
+                previous = old_by_id.get(chunk.id)
+                if previous is not None and previous["content_hash"] == chunk.content_hash:
+                    chunk.embedding_status = str(previous["embedding_status"])
+                    chunk.created_at = str(previous["created_at"])
+                else:
+                    chunk.embedding_status = "pending"
+                    to_embed.append(chunk)
+
+            vectors = embedding.embed([chunk.content for chunk in to_embed]) if to_embed else []
+            if len(vectors) != len(to_embed):
+                raise RuntimeError("embedding provider returned a mismatched vector count")
+            stale_ids = sorted(set(old_by_id) - {chunk.id for chunk in rebuilt})
+            vector_store = SQLiteVectorStore(
+                database,
+                provider=embedding.name,
+                model=embedding.model,
+            )
+            with database.connection:
+                database.delete_chunks(stale_ids)
+                for chunk in rebuilt:
+                    database.upsert_chunk(chunk, document.title)
+                for chunk, vector in zip(to_embed, vectors):
+                    vector_store.upsert(
+                        chunk.id,
+                        vector,
+                        provider=embedding.name,
+                        model=embedding.model,
+                        content_hash=chunk.content_hash,
+                    )
+            requested = tuple(dict.fromkeys(str(value) for value in affected_segment_ids if str(value)))
+            return {
+                "run_id": run_id,
+                "document_id": record.document_id,
+                "rebuilt_chunks": len(rebuilt),
+                "embedded_chunks": len(to_embed),
+                "deleted_chunks": len(stale_ids),
+                "affected_segment_ids": list(requested),
+            }
+
+    def approve_transcript_for_retrieval(self, run_id: str) -> dict[str, object]:
+        """Record human review, build the deferred index, and enable Q&A."""
+
+        with KnowledgeDatabase(self.paths.database) as database:
+            repository = TranscriptRepository(database)
+            record = repository.get_run(run_id)
+            if record is None or not record.document_id:
+                raise ValueError("转写任务不存在或尚未关联资料")
+            quality = dict(record.quality)
+            metrics = quality.get("metrics")
+            metrics = dict(metrics) if isinstance(metrics, dict) else {}
+            metrics.update({"human_reviewed": True, "human_reviewed_at": utcnow_iso()})
+            quality["status"] = "pass"
+            quality["metrics"] = metrics
+            repository.update_run_status(run_id, "completed", quality=quality)
+        try:
+            index_report = self.refresh_transcript_index(run_id)
+        except BaseException:
+            # A failed embedding/index refresh must not turn a deferred source
+            # into an apparently approved-but-unsearchable one.
+            with KnowledgeDatabase(self.paths.database) as database:
+                TranscriptRepository(database).update_run_status(
+                    run_id,
+                    record.status,
+                    quality=record.quality,
+                )
+            raise
+        with KnowledgeDatabase(self.paths.database) as database:
+            if not database.set_document_enabled(record.document_id, True):
+                raise ValueError("无法重新启用关联资料")
+            return {
+                "run_id": run_id,
+                "document_id": record.document_id,
+                "quality_status": "pass",
+                "enabled": True,
+                "rebuilt_chunks": index_report["rebuilt_chunks"],
+                "embedded_chunks": index_report["embedded_chunks"],
+            }
 
     def rename_document(self, document_id: str, title: str) -> bool:
         with KnowledgeDatabase(self.paths.database) as database:

@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 import urllib.parse
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -20,6 +20,7 @@ from ..product import DesktopSettings, ProductPaths, PRODUCT_NAME
 from ..qa.models import AnswerRequest
 from ..runtime import build_answer_provider, build_embedding_provider
 from ..storage import KnowledgeDatabase
+from ..transcripts import TranscriptRepository, transcript_from_dict
 from .cleanup import TemporaryCleanupRegistry
 from .extractors import (
     ExtractionContext,
@@ -36,6 +37,13 @@ from .vision import MultimodalInterpreter
 ProgressCallback = Callable[[ProgressEvent], None]
 _PUBLIC_CLEANUP_WARNING = (
     "临时清理失败：缓存目录已安全登记，将在下次启动或导入时自动重试"
+)
+_SYNTHESIS_HEADINGS = (
+    "## 已确认事实",
+    "## 推测与待验证",
+    "## 争议与不同观点",
+    "## 结论与决策",
+    "## 行动项",
 )
 
 
@@ -54,6 +62,7 @@ class IngestionResult:
     extracted_characters: int = 0
     warnings: list[str] = field(default_factory=list)
     quality_report: dict[str, object] = field(default_factory=dict)
+    transcript_run_id: str | None = None
     error: str | None = None
     duration_ms: float = 0.0
 
@@ -241,10 +250,22 @@ class IngestionService:
                     break
                 try:
                     package_id, members = packages[item]
+                    glossary_terms = TranscriptRepository(database).context_terms(
+                        knowledge_space_id=self.settings.asr_knowledge_space_id,
+                        source_id=_source_id(item),
+                    )
+                    effective_settings = replace(
+                        self.settings,
+                        asr_context_terms=list(dict.fromkeys([
+                            *self.settings.asr_context_terms,
+                            *glossary_terms,
+                        ]))[:200],
+                    )
                     result = self._ingest_one(
                         item, indexing, vision, token, progress,
                         package_id=package_id,
                         package_members=members,
+                        settings=effective_settings,
                     )
                 except CancelledError as exc:
                     error, warnings = _public_failure(exc)
@@ -308,6 +329,7 @@ class IngestionService:
         *,
         package_id: str,
         package_members: list[str],
+        settings: DesktopSettings | None = None,
     ) -> IngestionResult:
         cancellation.check()
         self._emit(progress, item, "preparing", 3, "正在识别资料类型")
@@ -317,7 +339,7 @@ class IngestionService:
 
         context = ExtractionContext(
             paths=self.paths,
-            settings=self.settings,
+            settings=settings or self.settings,
             cancellation=cancellation,
             vision=vision,
             progress=extraction_progress,
@@ -396,6 +418,18 @@ class IngestionService:
             raise QualityGateError(failures or "资料质量未达到入库标准", quality)
         extracted.metadata["quality_report"] = quality.to_dict()
 
+        transcript = None
+        transcript_gate_blocked = False
+        if extracted.transcript_data is not None:
+            try:
+                transcript = transcript_from_dict(extracted.transcript_data)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Transcript V2 事实层无效，已停止入库：{str(exc)[:160]}") from exc
+            transcript_gate_blocked = bool(
+                context.settings.transcript_quality_gate
+                and transcript.quality.status != "pass"
+            )
+
         self._emit(progress, item, "archiving", 52, "正在归档原始资料与解析结果")
         source_id = _source_id(item)
         temporary_source = context.owns_temporary_path(extracted.source_path)
@@ -465,8 +499,18 @@ class IngestionService:
             # Keeping this cancellation check inside the same rollback boundary
             # prevents an index-before-cancel race from leaking a new raw source.
             cancellation.check()
-            self._emit(progress, item, "indexing", 68, "正在分块、建立全文与向量索引")
-            indexed = indexing.index_document(document)
+            if transcript_gate_blocked:
+                self._emit(
+                    progress,
+                    item,
+                    "indexing",
+                    68,
+                    "转写质量需要复核，正在保存事实层并跳过全文与向量索引",
+                )
+                indexed = indexing.persist_document_without_search_index(document)
+            else:
+                self._emit(progress, item, "indexing", 68, "正在分块、建立全文与向量索引")
+                indexed = indexing.index_document(document)
         except BaseException as error:
             try:
                 self._rollback_new_evidence(persisted)
@@ -500,8 +544,44 @@ class IngestionService:
                 package = None
                 owned_source = None
             derived = _PersistedDerivedArtifacts()
-        note_path: Path | None = None
         warnings = list(extracted.warnings)
+        transcript_run_id: str | None = None
+        if transcript is not None and (
+            indexed.status != "duplicate" or transcript_gate_blocked
+        ):
+            try:
+                transcription_metadata = extracted.metadata.get("transcription")
+                transcript_artifact: str | None = None
+                if indexed.status != "duplicate" and isinstance(transcription_metadata, dict):
+                    artifacts = transcription_metadata.get("artifacts")
+                    if isinstance(artifacts, dict) and artifacts.get("v2"):
+                        transcript_artifact = str(artifacts["v2"])
+                TranscriptRepository(indexing.database).save_transcript(
+                    transcript,
+                    document_id=indexed.document_id,
+                    transcript_path=transcript_artifact,
+                )
+                transcript_run_id = transcript.run.id
+                if transcript_gate_blocked:
+                    if indexed.status == "duplicate":
+                        warnings.append(
+                            "重复资料已有独立的检索记录；本次待复核转写事实已保存，"
+                            "且未新建全文或向量索引。"
+                        )
+                    else:
+                        warnings.append(
+                            "转写质量需要人工复核，资料与转写事实已保存，但未生成全文或向量索引；"
+                            "校订并确认质量后可加入问答。"
+                        )
+            except (OSError, ValueError, RuntimeError) as exc:
+                if indexed.status != "duplicate":
+                    indexing.remove_document_search_index(indexed.document_id)
+                    indexing.database.set_document_enabled(indexed.document_id, False)
+                warnings.append(
+                    f"转写事实层保存失败，已移除检索索引并保留资料：{str(exc)[:160]}"
+                )
+
+        note_path: Path | None = None
         if self.settings.create_source_notes and indexed.status in {"created", "updated"}:
             self._emit(progress, item, "noting", 84, "正在生成本地知识笔记")
             synthesis = ""
@@ -527,6 +607,7 @@ class IngestionService:
             extracted_characters=extracted.extracted_characters,
             warnings=warnings,
             quality_report=quality.to_dict(),
+            transcript_run_id=transcript_run_id,
         )
 
     @staticmethod
@@ -1110,21 +1191,56 @@ class IngestionService:
 
     def _synthesize(self, extracted: ExtractionResult) -> str:
         provider = build_answer_provider(self.config, model_id=self._deepseek_synthesis_model_id())
-        content = "\n\n".join(
-            self._located_segment(segment) for segment in extracted.segments if segment.retrieval_text
-        )[:80_000]
+        located_segments = [
+            self._located_segment(segment)
+            for segment in extracted.segments
+            if segment.retrieval_text
+        ]
+        content = "\n\n".join(located_segments)[:80_000]
         system = (
-            "你是 AI知识库-AI静静 的知识整理引擎。只根据用户给定的原始资料，"
-            "用简体中文生成结构化 Markdown。保留关键数字、条件、公式、流程和不确定性；"
-            "不得臆测。不要输出一级标题或 YAML。"
+            "你是 AI知识库-AI静静 的知识整理引擎。只能根据用户给定的原始资料，"
+            "用简体中文生成派生整理层 Markdown。这一层永远不是原始转写事实："
+            "不得改写、纠正、覆盖或补齐原始识别文字，不得把意译写成原话。"
+            "保留关键数字、条件、公式、流程和不确定性，不得臆测。"
+            "已被资料明确支持的内容才能放入‘已确认事实’；未被证实的因果、"
+            "意图、概括和建议必须放入‘推测与待验证’并明示不确定性；"
+            "不同说话人或段落的冲突说法必须并列，不得自行调和。"
+            "每条关键事实、争议说法、结论、决策和来自资料的行动项，"
+            "都必须在该条末尾原样复用原文段前的页码、幻灯片号或时间戳定位；"
+            "不得编造页码或时间戳。原文没有页码/时间戳时，只能复用其【片段】定位，"
+            "并且不得将无法定位的附加推断写成已确认事实。"
+            "不要输出一级标题或 YAML。"
         )
         user = (
             f"资料标题：{extracted.title}\n类型：{extracted.media_type}\n\n"
-            "请依次输出：## 核心摘要、## 关键知识、## 逻辑与流程、"
-            "## 重要证据与定位、## 局限与待验证、## 可拆分的知识卡片。\n\n"
-            "原始解析内容：\n" + content
+            "必须严格按下列二级标题和顺序输出，一个也不能省略：\n"
+            + "\n".join(_SYNTHESIS_HEADINGS)
+            + "\n若某层没有材料，写‘- 原始资料未提供。’；不得为填满栏目而推断。"
+            "行动项只记录资料明确提出的任务；责任人、时限或验收标准未说明时标为‘未说明’。\n\n"
+            "原始解析内容（每段开头的方括号是唯一可用定位）：\n" + content
         )
-        return provider.generate(AnswerRequest("整理这份资料", system, user, [])).markdown.strip()
+        markdown = provider.generate(
+            AnswerRequest("整理这份资料", system, user, [])
+        ).markdown.strip()
+        positions = [markdown.find(heading) for heading in _SYNTHESIS_HEADINGS]
+        if any(position < 0 for position in positions) or positions != sorted(positions):
+            raise RuntimeError("模型返回的知识整理缺少必需分层，已拒绝写入 Source Note")
+        allowed_citations = {
+            item.splitlines()[0]
+            for item in located_segments
+            if item.startswith("[") and item.splitlines()
+        }
+        for line in markdown.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith(("- ", "* ")) or "原始资料未提供" in stripped:
+                continue
+            citations = set(re.findall(r"\[[^\]\n]+\]", stripped))
+            if not citations:
+                raise RuntimeError("模型返回的关键条目缺少原始定位，已拒绝写入 Source Note")
+            fabricated = citations - allowed_citations
+            if fabricated:
+                raise RuntimeError("模型返回了原始资料中不存在的定位，已拒绝写入 Source Note")
+        return markdown
 
     def _deepseek_synthesis_model_id(self) -> str:
         """Resolve ingestion synthesis to DeepSeek without any Codex fallback."""
@@ -1144,14 +1260,78 @@ class IngestionService:
     @staticmethod
     def _located_segment(segment) -> str:
         location = []
-        if "page" in segment.location:
+        if segment.location.get("page") is not None:
             location.append(f"P{segment.location['page']}")
-        if "slide" in segment.location:
+        if segment.location.get("slide") is not None:
             location.append(f"S{segment.location['slide']}")
-        if "timestamp_start" in segment.location:
-            location.append(f"{float(segment.location['timestamp_start']):.1f}s")
-        prefix = f"[{' / '.join(location)}]\n" if location else ""
-        return prefix + segment.retrieval_text
+        if segment.location.get("timestamp_start") is not None:
+            try:
+                start = IngestionService._format_timestamp(
+                    float(segment.location["timestamp_start"])
+                )
+                end_value = segment.location.get("timestamp_end")
+                if end_value is not None:
+                    end = IngestionService._format_timestamp(float(end_value))
+                    location.append(f"{start}–{end}")
+                else:
+                    location.append(start)
+            except (TypeError, ValueError, OverflowError):
+                pass
+        if not location:
+            location.append(f"片段:{segment.id}")
+        return f"[{' / '.join(location)}]\n{segment.retrieval_text}"
+
+    @staticmethod
+    def _format_timestamp(seconds: float) -> str:
+        total_milliseconds = max(0, round(seconds * 1000))
+        total_seconds, milliseconds = divmod(total_milliseconds, 1000)
+        minutes, second = divmod(total_seconds, 60)
+        hours, minute = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02d}:{minute:02d}:{second:02d}.{milliseconds:03d}"
+        return f"{minute:02d}:{second:02d}.{milliseconds:03d}"
+
+    @staticmethod
+    def _transcript_note_metadata(extracted: ExtractionResult) -> dict[str, str]:
+        """Resolve Source Note provenance from the canonical Transcript V2 payload."""
+
+        transcript = extracted.transcript_data if isinstance(extracted.transcript_data, dict) else {}
+        transcription = extracted.metadata.get("transcription")
+        transcription = transcription if isinstance(transcription, dict) else {}
+        run = transcript.get("run")
+        run = run if isinstance(run, dict) else {}
+        quality = transcript.get("quality")
+        quality = quality if isinstance(quality, dict) else {}
+        artifacts = transcription.get("artifacts")
+        artifacts = artifacts if isinstance(artifacts, dict) else {}
+
+        values: dict[str, str] = {}
+        if artifacts.get("v2"):
+            values["v2_path"] = str(artifacts["v2"])
+        run_id = run.get("id") or transcription.get("v2_run_id")
+        if run_id:
+            values["run_id"] = str(run_id)
+        quality_status = quality.get("status")
+        transcription_quality = transcription.get("quality")
+        if not quality_status and isinstance(transcription_quality, dict):
+            quality_status = transcription_quality.get("status")
+        if quality_status:
+            values["quality"] = str(quality_status)
+
+        profile = run.get("profile") or transcription.get("profile")
+        provider = (
+            run.get("provider")
+            or transcription.get("provider")
+            or transcription.get("engine")
+        )
+        model = run.get("model") or transcription.get("model")
+        diarization = run.get("diarization_provider")
+        route = [str(item) for item in (profile, provider, model) if item]
+        if diarization:
+            route.append(f"说话人:{diarization}")
+        if route:
+            values["model_route"] = " -> ".join(route)
+        return values
 
     def _write_source_note(
         self,
@@ -1161,7 +1341,12 @@ class IngestionService:
         package: Path | None,
         synthesis: str,
     ) -> Path:
-        note = self.paths.notes / "Sources" / f"{safe_stem(extracted.title)}--{source.source_id[-8:]}.md"
+        note = (
+            self.paths.notes
+            / "Sources"
+            / f"{safe_stem(extracted.title)}--{source.source_id[-8:]}.md"
+        )
+        transcript_metadata = self._transcript_note_metadata(extracted)
         frontmatter = [
             "---",
             f"title: {json.dumps(extracted.title, ensure_ascii=False)}",
@@ -1171,6 +1356,34 @@ class IngestionService:
             f"media_type: {json.dumps(extracted.media_type)}",
             f"checksum: {json.dumps(extracted.checksum)}",
             f"updated_at: {json.dumps(utcnow_iso())}",
+            *(
+                [
+                    "transcript_v2_path: "
+                    + json.dumps(transcript_metadata["v2_path"], ensure_ascii=False)
+                ]
+                if transcript_metadata.get("v2_path") else []
+            ),
+            *(
+                [
+                    "transcript_run_id: "
+                    + json.dumps(transcript_metadata["run_id"], ensure_ascii=False)
+                ]
+                if transcript_metadata.get("run_id") else []
+            ),
+            *(
+                [
+                    "transcript_quality: "
+                    + json.dumps(transcript_metadata["quality"], ensure_ascii=False)
+                ]
+                if transcript_metadata.get("quality") else []
+            ),
+            *(
+                [
+                    "transcript_model_route: "
+                    + json.dumps(transcript_metadata["model_route"], ensure_ascii=False)
+                ]
+                if transcript_metadata.get("model_route") else []
+            ),
             "tags:",
             '  - "AI静静/原始资料"',
             f'  - "来源/{extracted.media_type}"',
@@ -1190,8 +1403,29 @@ class IngestionService:
             f"- 可检索字符：{extracted.extracted_characters}",
             "",
         ]
+        if transcript_metadata:
+            body.extend(["## 转写事实与模型路线", ""])
+            if transcript_metadata.get("v2_path"):
+                transcript_path = transcript_metadata["v2_path"].replace(">", "%3E")
+                body.append(
+                    f"- Transcript V2（原始识别与人工校订分层保存）："
+                    f"[打开事实文件](<{transcript_path}>)"
+                )
+            if transcript_metadata.get("run_id"):
+                body.append(f"- Run ID：`{transcript_metadata['run_id']}`")
+            if transcript_metadata.get("quality"):
+                body.append(
+                    f"- 质量状态：`{transcript_metadata['quality']}`"
+                    "（以 Transcript V2 `quality` 字段为准）"
+                )
+            if transcript_metadata.get("model_route"):
+                body.append(
+                    f"- 模型路线：`{transcript_metadata['model_route']}`"
+                    "（以 Transcript V2 `run` 字段为准）"
+                )
+            body.append("")
         if synthesis:
-            body.extend(["## AI 知识提炼", "", synthesis, ""])
+            body.extend(["## AI 知识提炼（派生层，不覆盖原始事实）", "", synthesis, ""])
         body.extend(["## 原始内容导航", ""])
         for segment in extracted.segments[:80]:
             excerpt = segment.retrieval_text.replace("\n", " ").strip()[:240]

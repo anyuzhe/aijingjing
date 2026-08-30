@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "media-knowledge"
-version = "2.2.0"
+version = "2.3.0"
 description = "AI知识库-AI静静：本地优先的多模态知识摄取与可溯源问答桌面应用"
 requires-python = ">=3.11"
 dependencies = []
@@ -12,6 +12,8 @@ dependencies = []
 [project.optional-dependencies]
 desktop = [
   "PySide6-Essentials>=6.7,<7",
+  "PySide6-Addons>=6.7,<7",
+  "huggingface-hub>=0.34,<2",
   "keyring>=25,<26",
 ]
 documents = [
@@ -29,6 +31,11 @@ media = [
 ]
 apple-media = [
   "mlx-whisper>=0.4,<1",
+  "mlx-audio[stt]>=0.5,<0.6",
+]
+speaker = [
+  "pyannote.audio>=4,<5",
+  "sherpa-onnx>=1.12,<2",
 ]
 layout-ocr = [
   "paddleocr[doc-parser]>=3.2,<4",
@@ -38,9 +45,12 @@ semantic = [
 ]
 build = [
   "PyInstaller>=6.10,<7",
+  "pytest>=8,<10",
 ]
 full = [
   "PySide6-Essentials>=6.7,<7",
+  "PySide6-Addons>=6.7,<7",
+  "huggingface-hub>=0.34,<2",
   "keyring>=25,<26",
   "PyMuPDF>=1.24,<2",
   "python-docx>=1.1,<2",
@@ -53,6 +63,7 @@ full = [
   "yt-dlp>=2025.1,<2027",
   "fastembed>=0.8,<1",
   "PyInstaller>=6.10,<7",
+  "pytest>=8,<10",
 ]
 
 [project.scripts]

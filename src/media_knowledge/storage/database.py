@@ -10,7 +10,7 @@ from ..models import KnowledgeChunk, KnowledgeDocument, SearchFilters, SourceRef
 
 
 BASE_SCHEMA_VERSION = 8
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 class KnowledgeDatabase:
@@ -291,6 +291,7 @@ class KnowledgeDatabase:
             (9, self._migrate_answer_feedback),
             (10, self._migrate_ingestion_jobs),
             (11, self._migrate_knowledge_governance),
+            (12, self._migrate_transcript_facts),
         )
         for version, migration in migrations:
             if version in applied:
@@ -494,6 +495,136 @@ class KnowledgeDatabase:
                                  '{"managed_from":"artifacts"}', ?, ?)""",
                     (f"rel-{digest}", source_item_id, target_item_id, now, now),
                 )
+
+    def _migrate_transcript_facts(self) -> None:
+        """Add immutable ASR evidence plus editable, audited transcript facts."""
+
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS transcription_runs (
+                id TEXT PRIMARY KEY,
+                document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
+                source_name TEXT NOT NULL DEFAULT '',
+                source_checksum TEXT NOT NULL CHECK(length(trim(source_checksum)) > 0),
+                source_duration_ms INTEGER NOT NULL DEFAULT 0 CHECK(source_duration_ms >= 0),
+                profile TEXT NOT NULL CHECK(length(trim(profile)) > 0),
+                provider TEXT NOT NULL CHECK(length(trim(provider)) > 0),
+                model TEXT NOT NULL CHECK(length(trim(model)) > 0),
+                language TEXT,
+                status TEXT NOT NULL CHECK(status IN (
+                    'queued', 'running', 'completed', 'review', 'failed', 'cancelled'
+                )),
+                config_json TEXT NOT NULL DEFAULT '{}',
+                quality_json TEXT NOT NULL DEFAULT '{}',
+                transcript_path TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_transcription_runs_document
+                ON transcription_runs(document_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_transcription_runs_checksum
+                ON transcription_runs(source_checksum, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_transcription_runs_status
+                ON transcription_runs(status, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS transcript_speakers (
+                run_id TEXT NOT NULL REFERENCES transcription_runs(id) ON DELETE CASCADE,
+                speaker_id TEXT NOT NULL,
+                display_name TEXT,
+                name_source TEXT NOT NULL DEFAULT 'automatic'
+                    CHECK(name_source IN ('automatic', 'manual')),
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(run_id, speaker_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_transcript_speakers_name
+                ON transcript_speakers(run_id, display_name);
+
+            CREATE TABLE IF NOT EXISTS transcript_segments (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES transcription_runs(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                start_ms INTEGER NOT NULL CHECK(start_ms >= 0),
+                end_ms INTEGER NOT NULL CHECK(end_ms > start_ms),
+                speaker_id TEXT,
+                raw_text TEXT NOT NULL,
+                corrected_text TEXT,
+                confidence REAL CHECK(confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+                flags_json TEXT NOT NULL DEFAULT '[]',
+                words_json TEXT NOT NULL DEFAULT '[]',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(run_id, ordinal),
+                FOREIGN KEY(run_id, speaker_id)
+                    REFERENCES transcript_speakers(run_id, speaker_id) ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS idx_transcript_segments_run_time
+                ON transcript_segments(run_id, ordinal, start_ms, end_ms);
+            CREATE INDEX IF NOT EXISTS idx_transcript_segments_speaker
+                ON transcript_segments(run_id, speaker_id, ordinal);
+
+            CREATE TABLE IF NOT EXISTS transcript_edits (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES transcription_runs(id) ON DELETE CASCADE,
+                segment_id TEXT REFERENCES transcript_segments(id) ON DELETE CASCADE,
+                target_type TEXT NOT NULL CHECK(target_type IN (
+                    'segment_text', 'speaker_record', 'speaker_name',
+                    'speaker_merge', 'speaker_assignment'
+                )),
+                target_id TEXT NOT NULL,
+                before_text TEXT NOT NULL,
+                after_text TEXT NOT NULL,
+                edit_type TEXT NOT NULL,
+                confirmed INTEGER NOT NULL DEFAULT 1 CHECK(confirmed IN (0, 1)),
+                reason TEXT NOT NULL DEFAULT '',
+                actor TEXT NOT NULL DEFAULT 'user',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_transcript_edits_run
+                ON transcript_edits(run_id, created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_transcript_edits_segment
+                ON transcript_edits(segment_id, created_at, id);
+
+            CREATE TABLE IF NOT EXISTS asr_glossaries (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                scope TEXT NOT NULL CHECK(scope IN ('global', 'knowledge_space', 'source')),
+                scope_id TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(scope, scope_id, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_asr_glossaries_scope
+                ON asr_glossaries(scope, scope_id, enabled, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS asr_glossary_terms (
+                id TEXT PRIMARY KEY,
+                glossary_id TEXT NOT NULL REFERENCES asr_glossaries(id) ON DELETE CASCADE,
+                canonical_term TEXT NOT NULL CHECK(length(trim(canonical_term)) > 0),
+                normalized_term TEXT NOT NULL,
+                variants_json TEXT NOT NULL DEFAULT '[]',
+                notes TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(glossary_id, normalized_term)
+            );
+            CREATE INDEX IF NOT EXISTS idx_asr_glossary_terms_glossary
+                ON asr_glossary_terms(glossary_id, normalized_term);
+
+            CREATE TRIGGER IF NOT EXISTS transcript_segments_raw_text_immutable
+            BEFORE UPDATE OF raw_text ON transcript_segments
+            WHEN OLD.raw_text IS NOT NEW.raw_text
+            BEGIN
+                SELECT RAISE(ABORT, 'raw transcript text is immutable');
+            END;
+            """
+        )
 
     def get_document_by_source_id(self, source_id: str) -> sqlite3.Row | None:
         return self.connection.execute(
@@ -1214,6 +1345,8 @@ class KnowledgeDatabase:
             "ingestion_jobs", "ingestion_job_items",
             "knowledge_items", "knowledge_aliases", "knowledge_item_tags",
             "knowledge_relations",
+            "transcription_runs", "transcript_speakers", "transcript_segments",
+            "transcript_edits", "asr_glossaries", "asr_glossary_terms",
         ):
             counts[table] = self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         states = {

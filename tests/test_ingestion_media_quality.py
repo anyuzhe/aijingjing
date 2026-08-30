@@ -157,6 +157,9 @@ class TranscriptionQualityTests(unittest.TestCase):
             "media_knowledge.ingestion.transcription.select_transcription_plan",
             return_value=mlx_plan,
         ), patch(
+            "media_knowledge.ingestion.transcription.resolve_local_hf_model",
+            return_value="/models/local-whisper-small",
+        ), patch(
             "media_knowledge.ingestion.transcription._transcribe_mlx",
             side_effect=RuntimeError("metal error"),
         ), patch(
@@ -177,6 +180,9 @@ class TranscriptionQualityTests(unittest.TestCase):
         with patch(
             "media_knowledge.ingestion.transcription.select_transcription_plan",
             return_value=mlx_plan,
+        ), patch(
+            "media_knowledge.ingestion.transcription.resolve_local_hf_model",
+            return_value="/models/local-whisper-small",
         ), patch(
             "media_knowledge.ingestion.transcription._transcribe_mlx",
             side_effect=CancelledError("任务已取消"),

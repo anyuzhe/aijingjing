@@ -17,10 +17,39 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
+from uuid import uuid4
 
 from ..models import ContentSegment
 from ..product import DesktopSettings, ProductPaths
+from ..transcripts import (
+    TranscriptQuality as TranscriptV2Quality,
+    TranscriptRun as TranscriptV2Run,
+    TranscriptSegment as TranscriptV2Segment,
+    TranscriptSource as TranscriptV2Source,
+    TranscriptSpeaker as TranscriptV2Speaker,
+    TranscriptV2,
+    TranscriptWord as TranscriptV2Word,
+    evaluate_transcript_quality,
+    write_transcript,
+)
+from .audio import AudioPreparationResult, prepare_audio
+from .checkpoints import (
+    CheckpointIdentity,
+    MediaCheckpointStore,
+    configuration_hash,
+    glossary_version,
+)
 from .cleanup import TemporaryCleanupRegistry
+from .diarization import (
+    DiarizationRequest,
+    DiarizationResult,
+    DiarizationRouter,
+    DiarizationSegment,
+    DiarizationUnavailable,
+    TimedWord,
+    build_speaker_cues,
+    fuse_words_with_speakers,
+)
 from .ocr import OCRResult, extract_ocr
 from .transcription import (
     TranscriptSegment,
@@ -593,6 +622,311 @@ def _wav_duration(path: Path) -> float:
         return 0.0
 
 
+def _silence_intervals_ms(prepared: AudioPreparationResult) -> list[tuple[int, int]]:
+    duration_ms = max(0, round(prepared.normalized.duration_seconds * 1000))
+    cursor = 0
+    intervals: list[tuple[int, int]] = []
+    for segment in prepared.vad_segments:
+        start = max(0, round(segment.start * 1000))
+        end = max(start, round(segment.end * 1000))
+        if start > cursor:
+            intervals.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < duration_ms:
+        intervals.append((cursor, duration_ms))
+    return intervals
+
+
+def _media_checkpoint_configuration(settings: DesktopSettings) -> dict[str, object]:
+    """Select only settings that can change deterministic media-stage facts."""
+
+    return {
+        "pipeline": "audio-video-v2-checkpoints-1",
+        "normalization": {
+            "sample_rate": 16_000,
+            "channels": 1,
+            "sample_format": "pcm_s16le",
+        },
+        "vad": {
+            "algorithm": "energy-v1",
+            "frame_ms": 30,
+            "min_speech_ms": 240,
+            "min_silence_ms": 420,
+            "padding_ms": 180,
+        },
+        "asr": {
+            "profile": settings.transcription_profile,
+            "provider": settings.asr_provider,
+            "model": settings.asr_model or settings.whisper_model,
+            "model_path": settings.asr_model_path,
+            "model_sha256": settings.asr_model_sha256,
+            "fallback_model_path": settings.asr_whisper_fallback_model_path,
+            "fallback_model_sha256": settings.asr_whisper_fallback_model_sha256,
+            "language": settings.transcription_language,
+            "engine": settings.transcription_engine,
+            "allow_fallback": settings.transcription_allow_cpu_fallback,
+            "word_timestamps": settings.word_timestamps,
+            "context_terms": list(settings.asr_context_terms),
+        },
+        "diarization": {
+            "enabled": settings.diarization_enabled,
+            "provider": settings.diarization_provider,
+            "model_path": settings.diarization_model_path,
+            "model_sha256": settings.diarization_model_sha256,
+            "min_speakers": settings.diarization_min_speakers,
+            "max_speakers": settings.diarization_max_speakers,
+        },
+        "quality_gate": settings.transcript_quality_gate,
+    }
+
+
+def _diarization_from_checkpoint(value: object) -> DiarizationResult | None:
+    if not isinstance(value, dict) or value.get("status") != "complete":
+        return None
+    result = value.get("result")
+    if not isinstance(result, dict):
+        return None
+    raw_segments = result.get("segments")
+    segments = [
+        DiarizationSegment(
+            float(item.get("start", 0.0)),
+            float(item.get("end", 0.0)),
+            str(item.get("speaker_id") or ""),
+            confidence=item.get("confidence"),
+            overlap=bool(item.get("overlap", False)),
+            metadata=dict(item.get("metadata") or {}),
+        )
+        for item in raw_segments if isinstance(item, dict)
+    ] if isinstance(raw_segments, list) else []
+    return DiarizationResult(
+        provider_id=str(result.get("provider") or "unknown"),
+        model=str(result.get("model") or "unknown"),
+        segments=segments,
+        fallback_reasons=[str(item) for item in result.get("fallback_reasons", [])],
+        warnings=[str(item) for item in result.get("warnings", [])],
+        metadata=dict(result.get("metadata") or {}),
+    )
+
+
+def _transcript_v2(
+    *,
+    source_path: Path,
+    source_checksum: str,
+    prepared: AudioPreparationResult,
+    transcribed: TranscriptionResult,
+    settings: DesktopSettings,
+    diarization: DiarizationResult | None,
+    pipeline_warnings: list[str],
+) -> TranscriptV2:
+    """Build the immutable/editable Transcript V2 fact representation."""
+
+    run_id = f"asr-run-{uuid4().hex}"
+    actual_model_sha256 = settings.asr_model_sha256
+    if (
+        (transcribed.provider or transcribed.plan.engine) == "mlx-whisper"
+        and "qwen3-asr" in (settings.asr_model or "").casefold()
+    ):
+        actual_model_sha256 = settings.asr_whisper_fallback_model_sha256
+    raw_segments = list(transcribed.segments)
+    v2_segments: list[TranscriptV2Segment] = []
+    if diarization is not None:
+        timed_words: list[TimedWord] = []
+        for segment in raw_segments:
+            if segment.words:
+                timed_words.extend(
+                    TimedWord(
+                        word.start,
+                        word.end,
+                        word.text,
+                        confidence=word.confidence,
+                    )
+                    for word in segment.words
+                    if word.text.strip()
+                )
+            elif segment.text.strip():
+                # Providers without word alignment retain a segment-level timing
+                # fact instead of inventing individual word timestamps.
+                timed_words.append(TimedWord(
+                    segment.start,
+                    segment.end,
+                    segment.text,
+                    confidence=segment.confidence,
+                    flags=("segment_level_timing", "speaker_alignment_unavailable"),
+                ))
+        fused = fuse_words_with_speakers(timed_words, diarization.segments)
+        cues = build_speaker_cues(fused)
+        for index, cue in enumerate(cues, 1):
+            flags = list(cue.flags)
+            if cue.overlap:
+                flags.append("overlap")
+            v2_segments.append(TranscriptV2Segment(
+                id=f"{run_id}-seg-{index:04d}",
+                ordinal=index - 1,
+                start_ms=round(cue.start * 1000),
+                end_ms=round(cue.end * 1000),
+                speaker_id=cue.speaker_id,
+                raw_text=cue.raw_text,
+                confidence=cue.confidence,
+                flags=tuple(dict.fromkeys(flags)),
+                words=tuple(
+                    TranscriptV2Word(
+                        round(word.start * 1000),
+                        round(word.end * 1000),
+                        word.text,
+                        word.confidence,
+                        word.speaker_id,
+                        {"overlap": word.overlap},
+                    )
+                    for word in cue.words
+                    if "speaker_alignment_unavailable" not in word.flags
+                ),
+                metadata={"overlap": cue.overlap},
+            ))
+    else:
+        for index, segment in enumerate(raw_segments, 1):
+            v2_segments.append(TranscriptV2Segment(
+                id=f"{run_id}-seg-{index:04d}",
+                ordinal=index - 1,
+                start_ms=round(segment.start * 1000),
+                end_ms=round(segment.end * 1000),
+                speaker_id=None,
+                raw_text=segment.text,
+                confidence=segment.confidence,
+                flags=(),
+                words=tuple(
+                    TranscriptV2Word(
+                        round(word.start * 1000),
+                        round(word.end * 1000),
+                        word.text,
+                        word.confidence,
+                        word.speaker_id,
+                    )
+                    for word in segment.words
+                ),
+                metadata={"avg_logprob": segment.avg_logprob},
+            ))
+
+    finish_reason = str(transcribed.finish_reason or "stop").strip().casefold() or "stop"
+    finish_indicates_truncation = transcribed.truncated or finish_reason in {
+        "length", "max_tokens", "token_limit", "truncated", "content_filter",
+    }
+    if v2_segments:
+        final_segment = v2_segments[-1]
+        final_segment.metadata.update({
+            "finish_reason": finish_reason,
+            "transcribed_truncated": bool(transcribed.truncated),
+        })
+        finish_flags = list(final_segment.flags)
+        if finish_indicates_truncation:
+            finish_flags.extend(("truncated", "finish_reason_truncated"))
+        if finish_reason != "stop":
+            finish_flags.append(f"finish_reason_{finish_reason}")
+        final_segment.flags = tuple(dict.fromkeys(finish_flags))
+
+    diarization_provider: str | None = None
+    if settings.diarization_enabled and settings.diarization_provider != "none":
+        diarization_provider = (
+            diarization.provider_id
+            if diarization is not None
+            else f"{settings.diarization_provider}:unavailable"
+        )
+    transcript = TranscriptV2(
+        source=TranscriptV2Source(
+            source_path.name,
+            source_checksum,
+            round(prepared.normalized.duration_seconds * 1000),
+            metadata={"audio_probe": prepared.probe.to_dict()},
+        ),
+        run=TranscriptV2Run(
+            id=run_id,
+            profile=transcribed.profile,
+            provider=transcribed.provider or transcribed.plan.engine,
+            model=transcribed.plan.model,
+            language=transcribed.language,
+            word_timestamps=settings.word_timestamps,
+            diarization_provider=diarization_provider,
+            context_profile="settings" if settings.asr_context_terms else None,
+            fallback={
+                "reasons": list(dict.fromkeys([
+                    *transcribed.plan.fallback_reasons,
+                    *transcribed.fallback_reasons,
+                ])),
+                "history": list(transcribed.fallback_history),
+            } if transcribed.fallback_history or transcribed.fallback_reasons or transcribed.plan.fallback_reasons else None,
+            config={
+                "device": transcribed.plan.device,
+                "compute_type": transcribed.plan.compute_type,
+                "requested_provider": settings.asr_provider,
+                "requested_model": settings.asr_model or settings.whisper_model,
+                "requested_model_sha256": settings.asr_model_sha256,
+                "actual_model_sha256": actual_model_sha256,
+                "whisper_fallback_model_sha256": (
+                    settings.asr_whisper_fallback_model_sha256
+                ),
+                "language": settings.transcription_language,
+                "context_terms": list(settings.asr_context_terms),
+                "quality_gate": settings.transcript_quality_gate,
+            },
+        ),
+        speakers=[
+            TranscriptV2Speaker(speaker_id)
+            for speaker_id in dict.fromkeys(
+                item.speaker_id for item in (diarization.segments if diarization else [])
+            )
+        ],
+        segments=v2_segments,
+        metadata={
+            "vad_segments": [item.to_dict() for item in prepared.vad_segments],
+            "audio_probe": prepared.probe.to_dict(),
+            "pipeline_warnings": list(dict.fromkeys(pipeline_warnings)),
+            "finish_reason": transcribed.finish_reason,
+            "truncated": transcribed.truncated,
+        },
+    )
+    report = evaluate_transcript_quality(
+        transcript,
+        expected_language=(
+            settings.transcription_language
+            if settings.transcription_language != "auto" else None
+        ),
+        silence_intervals_ms=_silence_intervals_ms(prepared),
+        audio_metrics={
+            "decode_ok": prepared.probe.decode_ok,
+            "duration_ms": round(prepared.normalized.duration_seconds * 1000),
+            "loudness_dbfs": prepared.probe.loudness_dbfs,
+            "silence_ratio": prepared.probe.silence_ratio,
+            "clipping_ratio": prepared.probe.clipping_ratio,
+        },
+    )
+    extra_warnings = list(dict.fromkeys([
+        *prepared.probe.warnings,
+        *transcribed.warnings,
+        *pipeline_warnings,
+        *(diarization.warnings if diarization else []),
+    ]))
+    status = report.status
+    if status == "pass" and extra_warnings:
+        status = "review"
+    transcript.quality = TranscriptV2Quality(
+        status=status,
+        warnings=tuple(dict.fromkeys([
+            *(issue.message for issue in report.issues),
+            *extra_warnings,
+        ])),
+        metrics={
+            **report.metrics,
+            "vad_segment_count": len(prepared.vad_segments),
+            "decode_ok": prepared.probe.decode_ok,
+            "loudness_dbfs": prepared.probe.loudness_dbfs,
+            "silence_ratio": prepared.probe.silence_ratio,
+            "clipping_ratio": prepared.probe.clipping_ratio,
+            "finish_reason": finish_reason,
+            "truncated": finish_indicates_truncation,
+        },
+    )
+    return transcript
+
+
 class AudioVideoExtractor:
     audio_suffixes = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus"}
     video_suffixes = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
@@ -604,6 +938,25 @@ class AudioVideoExtractor:
             raise MissingExtractorDependency("音视频组件 FFmpeg 未安装或未随应用打包")
         is_video = path.suffix.casefold() in self.video_suffixes
         source_checksum = sha256_file(path)
+        checkpoint_config = _media_checkpoint_configuration(context.settings)
+        checkpoint_store = MediaCheckpointStore(
+            context.paths.cache,
+            CheckpointIdentity(
+                source_sha256=source_checksum,
+                config_hash=configuration_hash(checkpoint_config),
+                asr_provider=context.settings.asr_provider,
+                asr_model=context.settings.asr_model or context.settings.whisper_model,
+                speaker_provider=(
+                    context.settings.diarization_provider
+                    if context.settings.diarization_enabled else "none"
+                ),
+                glossary_version=glossary_version(context.settings.asr_context_terms),
+                asr_model_sha256=context.settings.asr_model_sha256 or "",
+                speaker_model_sha256=(
+                    context.settings.diarization_model_sha256 or ""
+                ),
+            ),
+        )
         derived_cache = context.paths.cache / "ingestion-derived"
         derived_cache.mkdir(parents=True, exist_ok=True)
         artifact_root = context.own_temporary_path(
@@ -617,45 +970,179 @@ class AudioVideoExtractor:
         context.message("正在提取音轨")
         try:
             with tempfile.TemporaryDirectory(prefix="ai-jingjing-media-") as temporary:
-                audio_path = Path(temporary) / "audio.wav"
-                process = subprocess.run(
-                    [ffmpeg, "-y", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000", str(audio_path)],
-                    capture_output=True,
-                    timeout=30 * 60,
+                prepared = prepare_audio(
+                    path,
+                    temporary,
+                    ffmpeg=ffmpeg,
+                    check_cancelled=context.cancellation.check,
+                    progress=context.message,
+                    checkpoint_store=checkpoint_store,
                 )
-                if process.returncode != 0 or not audio_path.is_file():
-                    raise RuntimeError("FFmpeg 无法提取音轨")
-                duration_seconds = _wav_duration(audio_path)
+                audio_path = Path(prepared.normalized.path)
+                duration_seconds = prepared.normalized.duration_seconds
+                requested_language = {
+                    "zh": "Chinese",
+                    "en": "English",
+                }.get(
+                    context.settings.transcription_language,
+                    context.settings.transcription_language,
+                )
                 try:
                     transcribed = transcribe_audio(
                         audio_path,
-                        model=context.settings.whisper_model,
+                        model=(context.settings.asr_model or context.settings.whisper_model),
+                        profile=context.settings.transcription_profile,
+                        provider=(
+                            None
+                            if context.settings.asr_provider == "auto"
+                            else context.settings.asr_provider
+                        ),
+                        model_path=context.settings.asr_model_path,
+                        whisper_fallback_model_path=(
+                            context.settings.asr_whisper_fallback_model_path
+                        ),
+                        language=None if requested_language == "auto" else requested_language,
+                        context_terms=context.settings.asr_context_terms,
+                        word_timestamps=context.settings.word_timestamps,
                         preferred_engine=context.settings.transcription_engine,
                         allow_cpu_fallback=context.settings.transcription_allow_cpu_fallback,
+                        allow_fallback=context.settings.transcription_allow_cpu_fallback,
                         duration_seconds=duration_seconds,
                         progress=context.message,
                         check_cancelled=context.cancellation.check,
+                        checkpoint_store=checkpoint_store,
                     )
                 except TranscriptionUnavailable as exc:
                     raise MissingExtractorDependency(str(exc)) from exc
-                segments: list[ContentSegment] = []
-                for index, item in enumerate(transcribed.segments, 1):
-                    context.cancellation.check()
-                    if not item.text:
-                        continue
-                    segments.append(
-                        ContentSegment(
-                            f"speech-{index}", item.start, "speech", text=item.text,
-                            location={"timestamp_start": float(item.start), "timestamp_end": float(item.end)},
-                            metadata={
-                                "language": transcribed.language,
-                                "engine": transcribed.plan.engine,
-                                "model": transcribed.plan.model,
-                                "confidence": item.confidence,
-                                "avg_logprob": item.avg_logprob,
-                            },
+                pipeline_warnings = list(prepared.probe.warnings)
+                diarized: DiarizationResult | None = None
+                if (
+                    context.settings.diarization_enabled
+                    and context.settings.diarization_provider != "none"
+                ):
+                    try:
+                        diarized = _diarization_from_checkpoint(
+                            checkpoint_store.read_json("diarization.json", "diarization")
                         )
+                    except (TypeError, ValueError, OverflowError):
+                        diarized = None
+                    if diarized is not None:
+                        context.message("已复用说话人分段检查点")
+                    else:
+                        context.message("正在区分并对齐说话人")
+                        try:
+                            diarized = DiarizationRouter().diarize(
+                                DiarizationRequest(
+                                    audio_path=audio_path,
+                                    model_path=(
+                                        Path(context.settings.diarization_model_path)
+                                        if context.settings.diarization_model_path else None
+                                    ),
+                                    preferred_provider=context.settings.diarization_provider,
+                                    min_speakers=context.settings.diarization_min_speakers,
+                                    max_speakers=context.settings.diarization_max_speakers,
+                                    allow_fallback=True,
+                                ),
+                                progress=context.message,
+                                check_cancelled=context.cancellation.check,
+                            )
+                            checkpoint_store.write_json(
+                                "diarization.json",
+                                "diarization",
+                                {"status": "complete", "result": diarized.to_dict()},
+                                runtime={"speaker_provider": diarized.provider_id},
+                            )
+                        except CancelledError:
+                            raise
+                        except (DiarizationUnavailable, OSError, RuntimeError, ValueError) as exc:
+                            pipeline_warnings.append(f"说话人识别需要复核：{exc}")
+                            checkpoint_store.write_json(
+                                "diarization.json",
+                                "diarization",
+                                {"status": "unavailable", "reason": str(exc)},
+                            )
+                else:
+                    checkpoint_store.write_json(
+                        "diarization.json",
+                        "diarization",
+                        {"status": "disabled", "result": None},
                     )
+
+                transcript_v2 = _transcript_v2(
+                    source_path=path,
+                    source_checksum=source_checksum,
+                    prepared=prepared,
+                    transcribed=transcribed,
+                    settings=context.settings,
+                    diarization=diarized,
+                    pipeline_warnings=pipeline_warnings,
+                )
+                checkpoint_runtime = {
+                    "asr_provider": transcribed.provider or transcribed.plan.engine,
+                    "asr_model": transcribed.plan.model,
+                    "asr_model_sha256": (
+                        context.settings.asr_whisper_fallback_model_sha256
+                        if (
+                            (transcribed.provider or transcribed.plan.engine)
+                            == "mlx-whisper"
+                            and "qwen3-asr"
+                            in (context.settings.asr_model or "").casefold()
+                        )
+                        else context.settings.asr_model_sha256
+                    ),
+                    "speaker_provider": (
+                        diarized.provider_id if diarized else checkpoint_store.identity.speaker_provider
+                    ),
+                }
+                transcript_v2.metadata["checkpoint"] = checkpoint_store.checkpoint_metadata(
+                    "transcript_v2", runtime=checkpoint_runtime
+                )
+                write_transcript(
+                    transcript_v2,
+                    checkpoint_store.path("transcript-v2.json"),
+                )
+                checkpoint_store.record_file(
+                    "transcript-v2.json", "transcript_v2", runtime=checkpoint_runtime
+                )
+                checkpoint_store.write_json(
+                    "quality.json",
+                    "quality",
+                    transcript_v2.quality.to_dict(),
+                    runtime=checkpoint_runtime,
+                )
+                segments: list[ContentSegment] = []
+                speaker_names = {
+                    speaker.id: speaker.display_name or speaker.id
+                    for speaker in transcript_v2.speakers
+                }
+                for index, item in enumerate(transcript_v2.segments, 1):
+                    context.cancellation.check()
+                    if not item.effective_text:
+                        continue
+                    start = item.start_ms / 1000.0
+                    end = item.end_ms / 1000.0
+                    segments.append(ContentSegment(
+                        item.id, start, "speech", text=item.effective_text,
+                        location={
+                            "timestamp_start": start,
+                            "timestamp_end": end,
+                            "speaker_id": item.speaker_id,
+                        },
+                        metadata={
+                            "language": transcribed.language,
+                            "engine": transcribed.plan.engine,
+                            "provider": transcribed.provider,
+                            "model": transcribed.plan.model,
+                            "confidence": item.confidence,
+                            "speaker_id": item.speaker_id,
+                            "speaker_name": speaker_names.get(item.speaker_id or ""),
+                            "overlap": "overlap" in item.flags,
+                            "asr_run_id": transcript_v2.run.id,
+                            "quality_status": transcript_v2.quality.status,
+                            "quality_flags": list(item.flags),
+                            "raw_text": item.raw_text,
+                        },
+                    ))
                 transcript_basename = f"{safe_stem(path.stem)}-{source_checksum[:10]}"
                 transcript_artifacts = write_transcript_artifacts(
                     transcribed,
@@ -663,11 +1150,20 @@ class AudioVideoExtractor:
                     transcript_basename,
                     source_name=path.name,
                 )
+                transcript_v2_path = write_transcript(
+                    transcript_v2,
+                    artifact_root / "transcript" / f"{transcript_basename}.v2.json",
+                )
+                transcribed.artifacts["v2"] = str(transcript_v2_path)
                 transcript_path = transcript_artifacts["txt"]
                 assets: list[Path] = []
                 warnings = list(dict.fromkeys([
+                    *prepared.probe.warnings,
                     *transcribed.plan.fallback_reasons,
                     *transcribed.fallback_reasons,
+                    *transcribed.warnings,
+                    *pipeline_warnings,
+                    *transcript_v2.quality.warnings,
                 ]))
                 if is_video and context.vision and context.vision.available:
                     context.message("正在抽取视频关键帧")
@@ -712,7 +1208,16 @@ class AudioVideoExtractor:
             warnings=warnings,
             retained_assets=assets,
             transcript_path=transcript_path,
-            metadata={"transcription": transcribed.metadata()},
+            transcript_data=transcript_v2.to_dict(),
+            metadata={
+                "transcription": {
+                    **transcribed.metadata(),
+                    "v2_run_id": transcript_v2.run.id,
+                    "quality": transcript_v2.quality.to_dict(),
+                    "audio_preparation": prepared.to_dict(),
+                    "diarization": diarized.to_dict() if diarized else None,
+                },
+            },
         )
 
 

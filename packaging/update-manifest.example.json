@@ -1,6 +1,6 @@
 {
-  "version": "2.2.0",
-  "download_url": "https://downloads.example.com/AI-Jingjing-2.2.0.dmg",
-  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "notes": "AI静静 2.2：正式知识治理与可恢复回收站、OCR/转写质量增强、内容寻址公开视频证据、深度隐私扫描和安全分享副本。"
+  "version": "2.3.0",
+  "download_url": "https://downloads.example.com/AI-Jingjing-2.3.0-macOS-arm64-MLX.dmg",
+  "sha256": "6b27e871292052e5bf10e87cd879fd2655c8c0542d878fa222a9ab18a5357f09",
+  "notes": "AI静静 2.3：可切换 Qwen3-ASR/Whisper、本地模型管理、音频预检与 VAD、Transcript V2、说话人识别、转写质量门禁、播放器和可审计人工校订。"
 }

@@ -11,9 +11,19 @@ from media_knowledge.documents import document_from_text
 from media_knowledge.embedding import HashEmbeddingProvider
 from media_knowledge.indexing import IndexingService
 from media_knowledge.ingestion import IngestionService
+from media_knowledge.ingestion.quality import QualityReport
+from media_knowledge.ingestion.types import ExtractionResult
 from media_knowledge.models import ContentSegment, KnowledgeDocument, SourceReference
 from media_knowledge.product import DesktopSettings, ProductPaths
 from media_knowledge.storage import KnowledgeDatabase, SQLiteVectorStore
+from media_knowledge.transcripts import (
+    TranscriptQuality,
+    TranscriptRepository,
+    TranscriptRun,
+    TranscriptSegment,
+    TranscriptSource,
+    TranscriptV2,
+)
 
 
 class CountingEmbeddingProvider(HashEmbeddingProvider):
@@ -341,6 +351,78 @@ class IndexingIntegrationTests(unittest.TestCase):
                 if path.is_file() and "source-packages" not in path.parts
             ]
             self.assertEqual(evidence_files, [])
+
+    def test_review_transcript_persists_facts_without_fts_or_vectors(self) -> None:
+        embedding = CountingEmbeddingProvider()
+
+        class TranscriptExtractor:
+            @staticmethod
+            def extract(path: Path, _context) -> ExtractionResult:
+                transcript = TranscriptV2(
+                    source=TranscriptSource(path.name, "review-checksum", 3000),
+                    run=TranscriptRun("review-run", "accuracy", "test", "tiny"),
+                    speakers=[],
+                    segments=[TranscriptSegment(
+                        "review-segment", 0, 0, 3000, None,
+                        "这是一段需要人工复核、但必须保留事实层的转写内容。",
+                    )],
+                    quality=TranscriptQuality("review", ("需要人工复核",)),
+                )
+                return ExtractionResult(
+                    title="待复核录音",
+                    media_type="audio",
+                    segments=[ContentSegment(
+                        "review-segment", 0, "speech",
+                        text="这是一段需要人工复核、但必须保留事实层的转写内容。",
+                        location={"timestamp_start": 0, "timestamp_end": 3},
+                    )],
+                    source_path=path,
+                    checksum="review-checksum",
+                    transcript_data=transcript.to_dict(),
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "review.audio"
+            source.write_bytes(b"source evidence")
+            paths = ProductPaths.resolve(root / "data")
+            settings = DesktopSettings(
+                archive_originals=False,
+                create_source_notes=False,
+                auto_synthesize_notes=False,
+                enable_cloud_vision=False,
+                transcript_quality_gate=True,
+            )
+            with patch(
+                "media_knowledge.ingestion.service.extractor_for",
+                return_value=TranscriptExtractor(),
+            ), patch(
+                "media_knowledge.ingestion.service.evaluate_extraction",
+                return_value=QualityReport(True, 100, "A", []),
+            ), patch(
+                "media_knowledge.ingestion.service.build_embedding_provider",
+                return_value=embedding,
+            ):
+                summary = IngestionService(paths, settings=settings).ingest([source])
+
+            result = summary.results[0]
+            self.assertEqual((result.status, result.chunks), ("created", 0))
+            self.assertEqual(result.transcript_run_id, "review-run")
+            self.assertEqual(embedding.batches, [])
+            with KnowledgeDatabase(paths.database) as database:
+                document = database.get_document(result.document_id or "")
+                self.assertIsNotNone(document)
+                self.assertFalse(bool(document["enabled"]))
+                self.assertEqual(database.get_chunks(result.document_id or ""), {})
+                self.assertEqual(
+                    database.connection.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    database.connection.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0],
+                    0,
+                )
+                self.assertIsNotNone(TranscriptRepository(database).get_run("review-run"))
 
 
 if __name__ == "__main__":

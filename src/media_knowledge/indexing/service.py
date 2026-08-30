@@ -124,6 +124,66 @@ class IndexingService:
             embedded_chunks=len(to_embed),
         )
 
+    def persist_document_without_search_index(self, document: KnowledgeDocument) -> IndexReport:
+        """Persist source metadata while guaranteeing that no search index remains.
+
+        This is used for Transcript V2 runs whose quality status is REVIEW or
+        FAIL.  It deliberately avoids both chunking and embedding work and also
+        removes an older searchable version when the same source is re-ingested.
+        """
+
+        content_hash = document.content_hash()
+        existing = self.database.get_document_by_source_id(document.source_id)
+        if existing is None:
+            duplicate = None
+            if document.source.checksum:
+                duplicate = self.database.get_document_by_checksum(document.source.checksum)
+            duplicate = duplicate or self.database.get_document_by_content_hash(content_hash)
+            if duplicate:
+                return IndexReport(
+                    document_id=duplicate["id"],
+                    source_id=document.source_id,
+                    status="duplicate",
+                    unchanged_chunks=len(self.database.get_chunks(duplicate["id"])),
+                    duplicate_of=duplicate["source_id"],
+                )
+
+        document_id = existing["id"] if existing else (
+            document.document_id or f"doc-{sha256_text(document.source_id)[:20]}"
+        )
+        document.document_id = document_id
+        document.source = replace(document.source, document_id=document_id)
+        document.updated_at = utcnow_iso()
+        previous = self.database.get_chunks(document_id) if existing else {}
+        unchanged = bool(
+            existing
+            and not previous
+            and not bool(existing["enabled"])
+            and self._document_state_matches(existing, document)
+        )
+        with self.database.connection:
+            self.database.upsert_document(document, content_hash)
+            self.database.replace_facets(document_id, document.collections, document.tags)
+            self.database.delete_chunks(row["id"] for row in previous.values())
+            self.database.connection.execute(
+                "UPDATE documents SET enabled=0, updated_at=? WHERE id=?",
+                (document.updated_at, document_id),
+            )
+
+        return IndexReport(
+            document_id=document_id,
+            source_id=document.source_id,
+            status="created" if existing is None else ("unchanged" if unchanged else "updated"),
+            deleted_chunks=len(previous),
+        )
+
+    def remove_document_search_index(self, document_id: str) -> int:
+        """Remove all FTS/vector-backed chunks while retaining source facts."""
+
+        chunks = self.database.get_chunks(document_id)
+        with self.database.connection:
+            return self.database.delete_chunks(row["id"] for row in chunks.values())
+
     def _document_state_matches(self, existing, document: KnowledgeDocument) -> bool:
         """Return true only when content and every persisted locator/facet agree."""
 

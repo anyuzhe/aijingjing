@@ -42,6 +42,13 @@ if module_available("mlx_whisper"):
     # runtime, and would add the entire PyTorch distribution to the app.
     hiddenimports += ["mlx_whisper"]
     datas += collect_data_files("mlx_whisper")
+if module_available("mlx_audio"):
+    # Qwen3-ASR is loaded dynamically from the STT registry. We ship the
+    # inference code, not model weights; users install weights explicitly from
+    # the in-app model manager.
+    hiddenimports += collect_submodules("mlx_audio.stt")
+    datas += collect_data_files("mlx_audio")
+    binaries += collect_dynamic_libs("mlx_audio")
 if module_available("mlx"):
     # MLX loads its Metal kernel library and native dylibs at runtime; normal
     # Python import analysis alone does not reliably preserve these files.
@@ -64,6 +71,10 @@ a = Analysis(
         "tkinter", "matplotlib", "pytest", "rapidocr.inference_engine.tensorrt",
         "onnxruntime.tools", "onnxruntime.transformers", "keyring.testing",
         "torch", "mlx_whisper.torch_whisper",
+        # The product intentionally has no microphone capture or realtime
+        # recording path.  mlx-audio may expose sounddevice as an unrelated
+        # optional dependency, so keep it out of the frozen desktop bundle.
+        "sounddevice",
     ],
     noarchive=False,
 )
@@ -82,9 +93,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleDisplayName": "AI知识库-AI静静",
             "CFBundleName": "AI静静",
-            "CFBundleShortVersionString": "2.2.0",
-            "CFBundleVersion": "2.2.0",
+            "CFBundleShortVersionString": "2.3.0",
+            "CFBundleVersion": "2.3.0",
             "NSHighResolutionCapable": True,
-            "NSMicrophoneUsageDescription": "用于导入和转写用户选择的音频资料。",
         },
     )

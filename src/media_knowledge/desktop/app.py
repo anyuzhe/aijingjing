@@ -40,6 +40,7 @@ try:
         QPushButton,
         QScrollArea,
         QSizePolicy,
+        QSpinBox,
         QSplitter,
         QStackedWidget,
         QStatusBar,
@@ -58,9 +59,14 @@ except ImportError as exc:  # pragma: no cover - exercised by the launcher witho
 from ..ingestion import CancellationToken, ProgressEvent
 from ..product import DEFAULT_ANSWER_MODEL, DesktopSettings, PRODUCT_NAME
 from ..qa.models import ImageAttachment
+from ..storage import KnowledgeDatabase
+from ..transcripts import TranscriptRepository
 from .. import __version__
+from .audio_player import MediaPlayerDialog
 from .controller import DesktopController
 from .diagnostics import run_diagnostics
+from .glossary_manager_dialog import GlossaryManagerDialog
+from .transcript_editor import TranscriptEditorDialog
 
 
 APP_STYLE = """
@@ -716,6 +722,7 @@ class SettingsDialog(QDialog):
         self.controller = controller
         self.setWindowTitle("设置 · AI静静")
         self.setMinimumWidth(590)
+        self.resize(760, 780)
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
         layout.addWidget(tabs)
@@ -735,6 +742,25 @@ class SettingsDialog(QDialog):
             if item["id"] == controller.settings.default_model:
                 self.model.setCurrentIndex(self.model.count() - 1)
         form.addRow("默认回答模型", self.model)
+        self.embedding_provider = QComboBox()
+        for label, value in (
+            ("本地哈希检索（零下载、稳定可用）", "hash"),
+            ("FastEmbed 多语义检索（仅使用已安装模型）", "fastembed"),
+        ):
+            self.embedding_provider.addItem(label, value)
+            if value == controller.settings.embedding_provider:
+                self.embedding_provider.setCurrentIndex(
+                    self.embedding_provider.count() - 1
+                )
+        self.embedding_provider.setAccessibleName("本地向量检索方式")
+        form.addRow("向量检索", self.embedding_provider)
+        embedding_hint = QLabel(
+            "导入和提问期间不会下载向量模型。新安装默认使用本地哈希；"
+            "选择 FastEmbed 前请先显式准备模型。"
+        )
+        embedding_hint.setWordWrap(True)
+        embedding_hint.setObjectName("muted")
+        form.addRow("", embedding_hint)
         self.archive = QCheckBox("将原始资料归档到应用目录")
         self.archive.setChecked(controller.settings.archive_originals)
         form.addRow("", self.archive)
@@ -782,18 +808,62 @@ class SettingsDialog(QDialog):
         self.ocr_threshold.setAccessibleName("OCR 低置信度阈值")
         media_form.addRow("低置信度阈值", self.ocr_threshold)
 
-        self.whisper_model = QComboBox()
-        for label, model in (
-            ("Tiny（速度最快，精度最低）", "tiny"),
-            ("Base（轻量）", "base"),
-            ("Small（默认平衡档）", "small"),
-            ("Medium（高精度）", "medium"),
-            ("Large v3（最高精度，推荐高质量转写）", "large-v3"),
+        self.transcription_profile = QComboBox()
+        for label, value in (
+            ("中文高精度（Qwen3-ASR 1.7B）", "chinese-accuracy"),
+            ("快速预览（Qwen3-ASR 0.6B）", "fast-preview"),
+            ("兼容模式（Whisper）", "compatibility"),
+            ("自定义路线", "custom"),
         ):
-            self.whisper_model.addItem(label, model)
-            if model == controller.settings.whisper_model:
-                self.whisper_model.setCurrentIndex(self.whisper_model.count() - 1)
-        media_form.addRow("语音识别模型", self.whisper_model)
+            self.transcription_profile.addItem(label, value)
+            if value == controller.settings.transcription_profile:
+                self.transcription_profile.setCurrentIndex(self.transcription_profile.count() - 1)
+        self.transcription_profile.setAccessibleName("转写处理方案")
+        media_form.addRow("转写方案", self.transcription_profile)
+
+        self.asr_provider = QComboBox()
+        for label, value in (
+            ("自动选择（按方案和本地可用性）", "auto"),
+            ("Qwen3-ASR · Apple MLX", "qwen3-mlx"),
+            ("Whisper · Apple MLX", "mlx-whisper"),
+            ("faster-whisper · CUDA / CPU", "faster-whisper"),
+        ):
+            self.asr_provider.addItem(label, value)
+            if value == controller.settings.asr_provider:
+                self.asr_provider.setCurrentIndex(self.asr_provider.count() - 1)
+        self.asr_provider.setAccessibleName("语音识别引擎")
+        media_form.addRow("识别引擎", self.asr_provider)
+
+        self.asr_model = QComboBox()
+        for label, model in (
+            ("Qwen3-ASR 1.7B（中文高精度）", "Qwen3-ASR-1.7B"),
+            ("Qwen3-ASR 0.6B（快速预览）", "Qwen3-ASR-0.6B"),
+            ("Whisper Large v3（高精度兼容）", "large-v3"),
+            ("Whisper Medium", "medium"),
+            ("Whisper Small", "small"),
+            ("Whisper Base", "base"),
+            ("Whisper Tiny（速度优先）", "tiny"),
+        ):
+            self.asr_model.addItem(label, model)
+        current_asr_model = controller.settings.asr_model or controller.settings.whisper_model
+        matched = self.asr_model.findData(current_asr_model)
+        if matched >= 0:
+            self.asr_model.setCurrentIndex(matched)
+        self.asr_model.setAccessibleName("语音识别具体模型")
+        self.whisper_model = self.asr_model  # compatibility for existing extensions
+        media_form.addRow("具体模型", self.asr_model)
+
+        model_row = QHBoxLayout()
+        self.asr_model_status = QLabel()
+        self.asr_model_status.setWordWrap(True)
+        self.asr_model_status.setObjectName("muted")
+        manage_models = QPushButton("管理本地模型…")
+        manage_models.setAccessibleName("打开本地转写模型管理器")
+        manage_models.clicked.connect(self._open_model_manager)
+        model_row.addWidget(self.asr_model_status, 1)
+        model_row.addWidget(manage_models)
+        media_form.addRow("本地状态", model_row)
+
         self.transcription_engine = QComboBox()
         for label, value in (
             ("自动（Apple MLX → NVIDIA CUDA → CPU）", "auto"),
@@ -809,16 +879,95 @@ class SettingsDialog(QDialog):
         self.cpu_fallback = QCheckBox("加速引擎不可用时，允许明确降级到 CPU（较慢）")
         self.cpu_fallback.setChecked(controller.settings.transcription_allow_cpu_fallback)
         media_form.addRow("", self.cpu_fallback)
+
+        self.transcription_language = QComboBox()
+        for label, value in (
+            ("自动识别", "auto"),
+            ("中文", "zh"),
+            ("英文", "en"),
+        ):
+            self.transcription_language.addItem(label, value)
+            if value == controller.settings.transcription_language:
+                self.transcription_language.setCurrentIndex(self.transcription_language.count() - 1)
+        media_form.addRow("主要语言", self.transcription_language)
+        self.word_timestamps = QCheckBox("保留词级时间戳（用于精确引用和说话人对齐）")
+        self.word_timestamps.setChecked(controller.settings.word_timestamps)
+        media_form.addRow("", self.word_timestamps)
+
+        self.asr_context_terms = QPlainTextEdit()
+        self.asr_context_terms.setPlainText("\n".join(controller.settings.asr_context_terms))
+        self.asr_context_terms.setPlaceholderText("每行一个术语，例如：FLAC3D\nFAST-LIVO2\n结构面")
+        self.asr_context_terms.setMaximumHeight(92)
+        self.asr_context_terms.setAccessibleName("本次默认转写上下文术语")
+        media_form.addRow("上下文术语", self.asr_context_terms)
+
+        self.asr_knowledge_space_id = QLineEdit(
+            controller.settings.asr_knowledge_space_id
+        )
+        self.asr_knowledge_space_id.setPlaceholderText("本地知识库")
+        self.asr_knowledge_space_id.setAccessibleName("转写知识空间 ID")
+        media_form.addRow("知识空间 ID", self.asr_knowledge_space_id)
+        manage_glossaries = QPushButton("管理专业词库…")
+        manage_glossaries.setAccessibleName("打开音视频专业词库管理器")
+        manage_glossaries.clicked.connect(self._open_glossary_manager)
+        media_form.addRow("专业词库", manage_glossaries)
+
+        self.diarization = QCheckBox("区分多位说话人（需要已安装的本地模型）")
+        self.diarization.setChecked(controller.settings.diarization_enabled)
+        media_form.addRow("", self.diarization)
+        self.diarization_provider = QComboBox()
+        for label, value in (
+            ("自动选择", "auto"),
+            ("pyannote Community-1", "pyannote"),
+            ("Sherpa-ONNX（预留）", "sherpa"),
+            ("不执行说话人识别", "none"),
+        ):
+            self.diarization_provider.addItem(label, value)
+            if value == controller.settings.diarization_provider:
+                self.diarization_provider.setCurrentIndex(self.diarization_provider.count() - 1)
+        media_form.addRow("说话人引擎", self.diarization_provider)
+        speaker_row = QHBoxLayout()
+        self.min_speakers = QSpinBox()
+        self.min_speakers.setRange(1, 20)
+        self.min_speakers.setValue(controller.settings.diarization_min_speakers)
+        self.min_speakers.setPrefix("最少 ")
+        self.min_speakers.setSuffix(" 人")
+        self.max_speakers = QSpinBox()
+        self.max_speakers.setRange(1, 20)
+        self.max_speakers.setValue(controller.settings.diarization_max_speakers)
+        self.max_speakers.setPrefix("最多 ")
+        self.max_speakers.setSuffix(" 人")
+        speaker_row.addWidget(self.min_speakers)
+        speaker_row.addWidget(self.max_speakers)
+        speaker_row.addStretch(1)
+        media_form.addRow("人数范围", speaker_row)
+        self.transcript_quality_gate = QCheckBox("质量为“需要复核/失败”时，不进入高可信问答索引")
+        self.transcript_quality_gate.setChecked(controller.settings.transcript_quality_gate)
+        media_form.addRow("", self.transcript_quality_gate)
         media_hint = QLabel(
             "每次 OCR 会保留文字框、置信度和降级原因；"
-            "音视频会同时产生 JSON、Markdown、TXT、SRT 和 VTT。"
-            "Apple Silicon 安装包内置 MLX 加速；Large v3 精度最高，但首次使用需下载约 3 GB 权重。"
-            "任何慢速降级都会在任务中明确显示。"
+            "音视频会保留原始转写、校订稿、时间戳、质量报告及运行路线。"
+            "缺少模型时会明确提示安装或切换，不会在导入过程中偷偷下载。"
+            "任何技术回退都会写入任务记录；用户取消不会触发回退。"
         )
         media_hint.setWordWrap(True)
         media_hint.setObjectName("muted")
         media_form.addRow("", media_hint)
-        tabs.addTab(media, "多媒体解析")
+        self.transcription_profile.currentIndexChanged.connect(self._apply_transcription_profile)
+        self.asr_provider.currentIndexChanged.connect(self._refresh_asr_model_status)
+        self.asr_model.currentIndexChanged.connect(self._refresh_asr_model_status)
+        self.diarization.toggled.connect(self._update_diarization_controls)
+        self.min_speakers.valueChanged.connect(
+            lambda value: self.max_speakers.setMinimum(value)
+        )
+        self._update_diarization_controls(self.diarization.isChecked())
+        self._refresh_asr_model_status()
+        media_scroll = QScrollArea()
+        media_scroll.setWidgetResizable(True)
+        media_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        media_scroll.setWidget(media)
+        media_scroll.setAccessibleName("多媒体解析设置")
+        tabs.addTab(media_scroll, "多媒体解析")
 
         providers = QWidget()
         provider_form = QFormLayout(providers)
@@ -866,6 +1015,88 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    @staticmethod
+    def _managed_model_id(model: str, provider: str = "auto") -> str | None:
+        if provider == "faster-whisper" and model in {
+            "large-v3", "medium", "small", "base", "tiny",
+        }:
+            return f"faster-whisper-{model}"
+        return {
+            "Qwen3-ASR-1.7B": "qwen3-asr-1.7b-mlx",
+            "Qwen3-ASR-0.6B": "qwen3-asr-0.6b-mlx",
+            "large-v3": "whisper-large-v3-mlx",
+            "medium": "whisper-medium-mlx",
+            "small": "whisper-small-mlx",
+            "base": "whisper-base-mlx",
+            "tiny": "whisper-tiny-mlx",
+        }.get(model)
+
+    @Slot()
+    def _apply_transcription_profile(self) -> None:
+        profile = str(self.transcription_profile.currentData() or "compatibility")
+        preferred: tuple[str, str] | None = {
+            "chinese-accuracy": ("qwen3-mlx", "Qwen3-ASR-1.7B"),
+            "fast-preview": ("qwen3-mlx", "Qwen3-ASR-0.6B"),
+        }.get(profile)
+        if profile == "compatibility":
+            current = str(self.asr_model.currentData() or "")
+            preferred = ("auto", current if current in {"large-v3", "medium", "small", "base", "tiny"} else self.controller.settings.whisper_model)
+        if preferred:
+            provider_index = self.asr_provider.findData(preferred[0])
+            model_index = self.asr_model.findData(preferred[1])
+            if provider_index >= 0:
+                self.asr_provider.setCurrentIndex(provider_index)
+            if model_index >= 0:
+                self.asr_model.setCurrentIndex(model_index)
+        self._refresh_asr_model_status()
+
+    @Slot()
+    def _refresh_asr_model_status(self) -> None:
+        model = str(self.asr_model.currentData() or "")
+        provider = str(self.asr_provider.currentData() or "auto")
+        managed_id = self._managed_model_id(model, provider)
+        if managed_id is None:
+            self.asr_model_status.setText("尚未选择可识别的本地模型。")
+            return
+        try:
+            status = self.controller.local_models.status(managed_id)
+        except (OSError, ValueError) as error:
+            self.asr_model_status.setText(f"无法检查模型状态：{error}")
+            return
+        if status.verified:
+            size_gb = status.size_bytes / (1024 ** 3)
+            self.asr_model_status.setText(
+                f"已安装 · {size_gb:.2f} GB · {status.source} · {status.path}"
+            )
+        else:
+            self.asr_model_status.setText(
+                "尚未安装。导入时不会自动联网；请先打开模型管理器安装或登记已有目录。"
+            )
+
+    @Slot()
+    def _open_model_manager(self) -> None:
+        from .model_manager_dialog import ModelManagerDialog
+
+        dialog = ModelManagerDialog(self.controller.local_models, self)
+        dialog.exec()
+        self._refresh_asr_model_status()
+
+    @Slot()
+    def _open_glossary_manager(self) -> None:
+        knowledge_space_id = self.asr_knowledge_space_id.text().strip() or "本地知识库"
+        dialog = GlossaryManagerDialog(
+            self.controller,
+            self,
+            knowledge_space_id=knowledge_space_id,
+        )
+        dialog.exec()
+
+    @Slot(bool)
+    def _update_diarization_controls(self, enabled: bool) -> None:
+        self.diarization_provider.setEnabled(enabled)
+        self.min_speakers.setEnabled(enabled)
+        self.max_speakers.setEnabled(enabled)
+
     def _choose_obsidian(self) -> None:
         value = QFileDialog.getExistingDirectory(self, "选择 Obsidian Vault", self.obsidian_path.text())
         if value:
@@ -880,9 +1111,53 @@ class SettingsDialog(QDialog):
         model = str(self.model.currentData() or self.controller.settings.default_model)
         if configured_deepseek_now and model == "local-extractive":
             model = DEFAULT_ANSWER_MODEL
+        asr_model = str(self.asr_model.currentData() or self.controller.settings.whisper_model)
+        selected_asr_provider = str(self.asr_provider.currentData() or "auto")
+        # Provider is part of model identity: Whisper MLX and CTranslate2
+        # weights share model names but are not interchangeable.
+        managed_model_id = self._managed_model_id(asr_model, selected_asr_provider)
+        model_path = (
+            self.controller.resolve_transcription_model(managed_model_id)
+            if managed_model_id else None
+        )
+        managed_model_status = (
+            self.controller.local_models.status(managed_model_id)
+            if managed_model_id else None
+        )
+        model_sha256 = (
+            managed_model_status.content_sha256
+            if managed_model_status and managed_model_status.content_verified
+            else None
+        )
+        legacy_whisper_model = (
+            asr_model
+            if asr_model in {"tiny", "base", "small", "medium", "large-v3"}
+            else self.controller.settings.whisper_model
+        )
+        context_terms = list(dict.fromkeys(
+            line.strip()
+            for line in self.asr_context_terms.toPlainText().splitlines()
+            if line.strip()
+        ))[:200]
+        diarization_path = self.controller.resolve_transcription_model("pyannote-community-1")
+        diarization_status = self.controller.local_models.status("pyannote-community-1")
+        whisper_fallback_path = self.controller.resolve_transcription_model(
+            "whisper-small-mlx"
+        )
+        whisper_fallback_status = self.controller.local_models.status(
+            "whisper-small-mlx"
+        )
         settings = replace(
             self.controller.settings,
             default_model=model,
+            embedding_provider=str(
+                self.embedding_provider.currentData() or "hash"
+            ),
+            embedding_model=(
+                "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+                if self.embedding_provider.currentData() == "fastembed"
+                else "hash-384-v1"
+            ),
             archive_originals=self.archive.isChecked(),
             create_source_notes=self.notes.isChecked(),
             auto_synthesize_notes=self.synthesis.isChecked(),
@@ -890,9 +1165,37 @@ class SettingsDialog(QDialog):
             ocr_engine=str(self.ocr_engine.currentData() or "auto"),
             ocr_complex_layout_enabled=self.complex_ocr.isChecked(),
             ocr_low_confidence_threshold=float(self.ocr_threshold.value()),
-            whisper_model=str(self.whisper_model.currentData() or "small"),
+            whisper_model=legacy_whisper_model,
             transcription_engine=str(self.transcription_engine.currentData() or "auto"),
             transcription_allow_cpu_fallback=self.cpu_fallback.isChecked(),
+            transcription_profile=str(self.transcription_profile.currentData() or "compatibility"),
+            asr_provider=selected_asr_provider,
+            asr_model=asr_model,
+            asr_model_path=model_path,
+            asr_model_sha256=model_sha256,
+            asr_whisper_fallback_model_path=whisper_fallback_path,
+            asr_whisper_fallback_model_sha256=(
+                whisper_fallback_status.content_sha256
+                if whisper_fallback_status.content_verified else None
+            ),
+            transcription_language=str(self.transcription_language.currentData() or "auto"),
+            asr_knowledge_space_id=(
+                self.asr_knowledge_space_id.text().strip() or "本地知识库"
+            ),
+            asr_context_terms=context_terms,
+            word_timestamps=self.word_timestamps.isChecked(),
+            diarization_enabled=self.diarization.isChecked(),
+            diarization_provider=str(self.diarization_provider.currentData() or "auto"),
+            diarization_model_path=diarization_path,
+            diarization_model_sha256=(
+                diarization_status.content_sha256
+                if diarization_status.content_verified else None
+            ),
+            diarization_min_speakers=int(self.min_speakers.value()),
+            diarization_max_speakers=max(
+                int(self.min_speakers.value()), int(self.max_speakers.value())
+            ),
+            transcript_quality_gate=self.transcript_quality_gate.isChecked(),
             watched_folders_enabled=self.watched_enabled.isChecked(),
             watched_scan_minutes=min(1440, max(1, int(self.watched_minutes.text() or "10"))),
             update_manifest_url=self.update_url.text().strip() or None,
@@ -933,6 +1236,7 @@ class MainWindow(QMainWindow):
         self._import_operation_token: object | None = None
         self._answer_operation_token: object | None = None
         self._search_operation_token: object | None = None
+        self._media_players: list[MediaPlayerDialog] = []
         self.setWindowTitle(PRODUCT_NAME)
         self.resize(1510, 920)
         self.setMinimumSize(1120, 700)
@@ -994,6 +1298,9 @@ class MainWindow(QMainWindow):
         quality = QAction("入库质检中心…", self)
         quality.triggered.connect(self.show_quality_center)
         knowledge_menu.addAction(quality)
+        transcript_editor = QAction("播放与校订音视频转写…", self)
+        transcript_editor.triggered.connect(self.open_transcript_editor)
+        knowledge_menu.addAction(transcript_editor)
         governance = QAction("知识体检中心…", self)
         governance.triggered.connect(self.show_knowledge_health)
         knowledge_menu.addAction(governance)
@@ -2450,6 +2757,7 @@ class MainWindow(QMainWindow):
         read_action = menu.addAction("在 AI静静中阅读原文")
         open_action = menu.addAction("用原应用打开")
         chunks_action = menu.addAction("查看解析知识块")
+        transcript_action = menu.addAction("播放与校订转写…")
         menu.addSeparator()
         rename_action = menu.addAction("重命名…")
         facets_action = menu.addAction("设置知识空间和标签…")
@@ -2463,6 +2771,8 @@ class MainWindow(QMainWindow):
         self.document_list.setCurrentItem(item)
         if chosen == read_action or chosen == chunks_action:
             self.open_source_reader()
+        elif chosen == transcript_action:
+            self.open_transcript_editor()
         elif chosen == open_action:
             self.document_list.setCurrentItem(item)
             self.open_selected_source()
@@ -3050,9 +3360,10 @@ class MainWindow(QMainWindow):
         self.prompt.clear()
         self._clear_pending_images(delete_files=True)
 
-    def open_source_reader(self) -> None:
+    def _selected_source_context(self) -> tuple[str | None, str | None, float | None]:
         document_id = None
         chunk_id = None
+        timestamp_start: float | None = None
         evidence_item = self.evidence_list.currentItem()
         if evidence_item:
             value = self.evidence_by_id.get(str(evidence_item.data(Qt.UserRole)))
@@ -3060,26 +3371,193 @@ class MainWindow(QMainWindow):
                 source = value.get("source") if isinstance(value.get("source"), dict) else {}
                 document_id = value.get("document_id") or source.get("document_id")
                 chunk_id = value.get("chunk_id") or source.get("chunk_id")
+                raw_timestamp = value.get("timestamp_start")
+                if raw_timestamp is None:
+                    raw_timestamp = source.get("timestamp_start")
             else:
                 document_id = getattr(value, "document_id", None)
                 chunk_id = getattr(value, "chunk_id", None)
                 source = getattr(value, "source", None)
                 document_id = document_id or getattr(source, "document_id", None)
                 chunk_id = chunk_id or getattr(source, "chunk_id", None)
+                raw_timestamp = getattr(value, "timestamp_start", None)
+                if raw_timestamp is None:
+                    raw_timestamp = getattr(source, "timestamp_start", None)
+            try:
+                timestamp_start = float(raw_timestamp) if raw_timestamp is not None else None
+            except (TypeError, ValueError):
+                timestamp_start = None
         if not document_id and self.document_list.currentItem():
             current = self.document_list.currentItem().data(Qt.UserRole)
             if isinstance(current, dict):
                 document_id = current.get("id")
-        document = next(
+        return (
+            str(document_id) if document_id else None,
+            str(chunk_id) if chunk_id else None,
+            timestamp_start,
+        )
+
+    def _document_record(self, document_id: str | None) -> dict[str, object] | None:
+        if not document_id:
+            return None
+        return next(
             (value for value in self.controller.documents(limit=2000) if value["id"] == document_id),
             None,
         )
+
+    def _release_media_player(self, dialog: MediaPlayerDialog) -> None:
+        if dialog in self._media_players:
+            self._media_players.remove(dialog)
+
+    def _open_media_player(
+        self,
+        document: dict[str, object],
+        *,
+        start_ms: int = 0,
+    ) -> bool:
+        latest = self.controller.latest_transcript(str(document["id"]))
+        transcript = latest.get("transcript") if isinstance(latest, dict) else None
+        transcript = transcript if isinstance(transcript, dict) else {}
+        speaker_values = transcript.get("speakers")
+        speaker_names = {
+            str(item.get("id")): str(item.get("display_name") or item.get("id"))
+            for item in speaker_values
+            if isinstance(item, dict) and item.get("id")
+        } if isinstance(speaker_values, list) else {}
+        raw_segments = transcript.get("segments")
+        segments: list[dict[str, object]] = []
+        if isinstance(raw_segments, list):
+            for value in raw_segments:
+                if not isinstance(value, dict):
+                    continue
+                enriched = dict(value)
+                speaker_id = str(enriched.get("speaker_id") or "")
+                if speaker_id:
+                    enriched["speaker_display_name"] = speaker_names.get(speaker_id, speaker_id)
+                segments.append(enriched)
+        target = (
+            latest.get("media_path") if isinstance(latest, dict) else None
+        ) or document.get("local_path") or document.get("original_uri")
+        if not target:
+            self.statusBar().showMessage("这份音视频没有可播放的本地原始资料", 6000)
+            return False
+        try:
+            player = MediaPlayerDialog(
+                str(target),
+                title=f"原始证据 · {document['title']}",
+                segments=segments,
+                start_ms=max(0, int(start_ms)),
+                autoplay=False,
+                parent=self,
+            )
+        except (RuntimeError, OSError, ValueError) as exc:
+            self._operation_error("无法打开音视频播放器", str(exc))
+            return False
+        player.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._media_players.append(player)
+        player.destroyed.connect(
+            lambda _object=None, value=player: self._release_media_player(value)
+        )
+        player.show()
+        player.raise_()
+        player.activateWindow()
+        return True
+
+    def open_source_reader(self) -> None:
+        document_id, chunk_id, timestamp_start = self._selected_source_context()
+        document = self._document_record(document_id)
         if not document:
             self.statusBar().showMessage("请先选择一份资料或一条证据", 5000)
+            return
+        if str(document.get("media_type") or "").casefold() in {"audio", "video"}:
+            self._open_media_player(
+                document,
+                start_ms=int(max(0.0, timestamp_start or 0.0) * 1000),
+            )
             return
         SourceReaderDialog(
             self.controller, document, chunk_id=str(chunk_id) if chunk_id else None, parent=self
         ).exec()
+
+    def open_transcript_editor(self) -> None:
+        document_id, _chunk_id, timestamp_start = self._selected_source_context()
+        document = self._document_record(document_id)
+        if not document:
+            self.statusBar().showMessage("请先选择一份音频或视频资料", 5000)
+            return
+        if str(document.get("media_type") or "").casefold() not in {"audio", "video"}:
+            self.statusBar().showMessage("当前资料不是音频或视频，没有可校订的转写", 6000)
+            return
+        latest = self.controller.latest_transcript(str(document["id"]))
+        if not isinstance(latest, dict):
+            self.statusBar().showMessage("这份资料还没有 Transcript V2 转写，请重新解析", 7000)
+            return
+        run = latest.get("run") if isinstance(latest.get("run"), dict) else {}
+        run_id = str(run.get("id") or "")
+        if not run_id:
+            self.statusBar().showMessage("转写任务记录不完整，请重新解析", 7000)
+            return
+
+        edited_segment_ids: set[str] = set()
+        state = {"speaker_changed": False, "approved": False}
+        with KnowledgeDatabase(self.controller.paths.database) as database:
+            repository = TranscriptRepository(database)
+            try:
+                dialog = TranscriptEditorDialog(
+                    repository,
+                    run_id,
+                    media_path=latest.get("media_path"),
+                    play_callback=lambda _path, start, _end: self._open_media_player(
+                        document, start_ms=start
+                    ),
+                    parent=self,
+                )
+            except (RuntimeError, KeyError, ValueError) as exc:
+                self._operation_error("无法打开转写校订", str(exc))
+                return
+            dialog.transcriptSaved.connect(
+                lambda _run, values: edited_segment_ids.update(
+                    str(value) for value in values if str(value)
+                )
+            )
+            dialog.speakerChanged.connect(
+                lambda _run, _values: state.__setitem__("speaker_changed", True)
+            )
+            dialog.reviewApproved.connect(
+                lambda _run: state.__setitem__("approved", True)
+            )
+            if timestamp_start is not None:
+                closest = min(
+                    range(len(dialog.transcript.segments)),
+                    key=lambda index: abs(
+                        dialog.transcript.segments[index].start_ms - timestamp_start * 1000
+                    ),
+                    default=None,
+                )
+                if closest is not None:
+                    dialog.segment_list.setCurrentRow(closest)
+            dialog.exec()
+
+        needs_refresh = bool(edited_segment_ids or state["speaker_changed"])
+        if not needs_refresh and not state["approved"]:
+            return
+
+        def persist_review() -> dict[str, object]:
+            report: dict[str, object] = {"run_id": run_id}
+            if needs_refresh:
+                report["index"] = self.controller.refresh_transcript_index(
+                    run_id,
+                    affected_segment_ids=edited_segment_ids,
+                )
+            if state["approved"]:
+                report["approval"] = self.controller.approve_transcript_for_retrieval(run_id)
+            return report
+
+        self._run_simple_background(
+            "正在更新校订后的说话人、全文与语义索引…",
+            persist_review,
+            lambda report: self._sync_complete({"转写校订": report}),
+        )
 
     def rename_selected_document(self) -> None:
         item = self.document_list.currentItem()
@@ -3537,21 +4015,57 @@ class MainWindow(QMainWindow):
             if isinstance(transcription.get("route"), dict)
             else {}
         )
+        attempts = route.get("attempts") if isinstance(route.get("attempts"), list) else []
+        attempt_labels = [
+            f"{item.get('provider')} / {item.get('model')}"
+            for item in attempts
+            if isinstance(item, dict)
+        ]
         route_label = (
-            f"{route.get('engine')} · {route.get('device')}/{route.get('compute_type')}"
+            f"{route.get('profile') or '未指定方案'} · "
+            + (" → ".join(attempt_labels) or "未形成可用路线")
             if route.get("available")
             else str(route.get("error") or "不可用")
         )
+        machine = report.get("machine") if isinstance(report.get("machine"), dict) else {}
+        offline = report.get("offline") if isinstance(report.get("offline"), dict) else {}
+        embedding = report.get("embedding") if isinstance(report.get("embedding"), dict) else {}
+        resource_scheduler = (
+            report.get("resource_scheduler")
+            if isinstance(report.get("resource_scheduler"), dict)
+            else {}
+        )
+        diarization = (
+            transcription.get("diarization")
+            if isinstance(transcription.get("diarization"), dict)
+            else {}
+        )
         lines = [
             f"Python {report['python']}",
+            f"设备：{machine.get('processor') or machine.get('machine') or '未知'} · "
+            f"{machine.get('memory_gb') or '未知'} GB 统一/系统内存 · "
+            f"Apple Silicon {'是' if machine.get('apple_silicon') else '否'}",
             f"SQLite FTS5：{'可用' if report['sqlite_fts5'] else '不可用'}",
             f"FFmpeg：{report['ffmpeg'] or '不可用'}",
             f"OCR：{ocr.get('requested_engine') or '自动'} · "
             f"RapidOCR {'可用' if ocr.get('rapidocr_available') else '不可用'} · "
             f"PaddleOCR {'可用' if ocr.get('paddleocr_available') else '可选未安装'}",
             f"转写路由：{route_label}",
+            f"向量检索：{embedding.get('provider') or '未知'} · "
+            f"{'本地就绪' if embedding.get('local_ready') else '本地模型缺失'}",
+            f"说话人路线：{diarization.get('provider') or '未启用'} · "
+            f"{diarization.get('reason') or '未检查'}",
+            f"严格离线：{'通过' if offline.get('strict_ready') else '未通过'} · "
+            f"隐藏模型下载 {'已阻止' if offline.get('hidden_model_downloads_blocked') else '需检查'}",
+            f"本地高内存任务并发：{resource_scheduler.get('concurrency_limit') or 1} · "
+            f"{resource_scheduler.get('release_policy') or '任务结束释放'}",
             "",
         ]
+        risks = offline.get("risks") if isinstance(offline.get("risks"), list) else []
+        if risks:
+            lines.append("离线检查提示：")
+            lines.extend(f"— {value}" for value in risks)
+            lines.append("")
         lines.extend(
             f"{'✓' if item['available'] else '—'} {item['name']}：{item['purpose']}"
             for item in report["components"]

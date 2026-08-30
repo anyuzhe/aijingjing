@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-205%20passed-2F855A" alt="205 tests passed">
-    <img src="https://img.shields.io/badge/Version-2.2.0-4C8FBF" alt="Version 2.2.0">
+    <img src="https://img.shields.io/badge/Test-300-2F855A" alt="300 tests">
+    <img src="https://img.shields.io/badge/Version-2.3.0-4C8FBF" alt="Version 2.3.0">
   </p>
 </div>
 
@@ -39,9 +39,14 @@ Every supported answer can lead back to an exact PDF page, PowerPoint slide, med
 - Select or drag multiple files in one batch.
 - Ingest Markdown, text, Word, PDF, PPTX, images, audio, video, and web pages.
 - Understand PDFs and presentations page by page instead of extracting text only.
-- Produce timestamped speech transcripts and optional video keyframes.
-- The official Apple Silicon bundle includes MLX/Metal acceleration; NVIDIA systems prefer CUDA; other environments use the bundled CPU int8 runtime and display the actual route explicitly. Available models are `tiny / base / small / medium / large-v3`, with `large-v3` providing the highest accuracy.
-- Preserve JSON, Markdown, TXT, SRT, and VTT transcripts together with engine, device, language, integrity metrics, and fallback reasons.
+- Decode-preflight media, atomically normalize its audio to 16 kHz mono PCM16, and run local VAD before transcription; videos can also retain selected keyframes.
+- Choose **Chinese accuracy (Qwen3-ASR 1.7B)**, **fast preview (Qwen3-ASR 0.6B)**, **Whisper compatibility**, or a custom Qwen3-ASR, MLX Whisper, or faster-whisper route.
+- Use MLX/Metal on Apple Silicon or faster-whisper CUDA/CPU int8 on NVIDIA/CPU systems. The UI exposes the actual Provider, model, device, and each fallback reason; cancellation never triggers a fallback.
+- Manage local models explicitly: inspect installation state and size, register an existing directory, copy-import weights, deliberately download, remove app-managed weights, and run cancellable SHA-256 verification over the actual model bytes. Import and status checks never download silently, and packages do not contain Qwen3-ASR, Whisper, or diarization model weights.
+- Maintain global, knowledge-space, and source-scoped technical glossaries. Glossary version, Provider, model-content digest, and the effective fallback route are retained with transcript facts and checkpoints.
+- Optionally distinguish multiple speakers, retain anonymous speaker IDs, overlap markers, speaker-count bounds, and alignments, then rename, reassign, or merge them manually.
+- Preserve immutable recognition, corrected text, segment/word timestamps, speakers, model route, fallback history, and quality state in `Transcript V2`, alongside JSON, Markdown, TXT, SRT, and VTT exports.
+- Persist atomic checkpoints for probe, normalized audio, VAD, ASR, diarization, Transcript V2, and quality. Interrupted jobs restart at the first incomplete stage, while source, configuration, model, or glossary changes invalidate stale results.
 - Ingest public YouTube, Bilibili, Douyin, Xiaohongshu, and X links using public subtitles first, then only chunk-monitored HTTP/HTTPS or native DASH media. Live, unfinished replay, and HLS transports that could fall back to an unbounded FFmpeg downloader are rejected before download with guidance to save an authorized local copy first.
 - Group related PPT/PDF/audio/video files into one `Source Package`.
 - Archive originals, web snapshots, transcripts, retained assets, and parse manifests.
@@ -54,13 +59,18 @@ Before a source is indexed, the application checks:
 - whether the real document body or media stream was obtained;
 - whether the result contains only a title, description, cover, or platform metadata;
 - PDF and presentation page coverage;
-- whether audio/video produced real speech or visual evidence;
+- whether the audio track decodes and what its codec, sample rate, channels, duration, loudness, silence ratio, and clipping risk are;
+- whether VAD found valid speech intervals and whether audio/video produced real speech or visual evidence;
 - OCR line coordinates, mean/minimum confidence, low-confidence lines, and complex-layout fallback reasons;
 - PP-StructureV3 Markdown tables, formulas, layout geometry, and page reading order;
 - reversed, out-of-range, abnormally overlapping, empty, or poorly covered transcript segments;
+- repeated generation, truncation, speech hallucinated over silence, abnormal character rate, and language/technical-term/number-unit risks;
+- expected speaker-count mismatch, unknown speakers, overlapping speech, and excessive speaker fragmentation;
 - checksums, extracted content size, and parser warnings.
 
 A restricted video page that exposes only a cover and description is rejected instead of being stored as fake video knowledge.
+
+Review/fail transcripts retain their source and Transcript V2 facts but create neither FTS nor vector entries until a human correction and approval atomically builds the deferred index. AI knowledge synthesis is a separate derived layer that must distinguish confirmed facts, unverified inference, disputes, decisions, and action items and rejects page/timestamp locators absent from the source.
 
 ### 3. Governed knowledge lifecycle
 
@@ -109,6 +119,8 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 ### 6. Source reading and knowledge management
 
 - Read PDF pages, images, extracted text, and media timelines inside the app.
+- Open the built-in player from an answer citation or transcript segment at the exact timestamp, highlight the active cue during playback, change speed, or hand the original file to the system application.
+- Correct a transcript beside immutable read-only recognition, record an edit reason, and rename, reassign, or merge speakers. Every change is audited, and saving rebuilds the affected indexes.
 - Inspect every parsed chunk and its locator.
 - Attach notes or learning cards to a specific evidence chunk.
 - Rename, disable, re-enable, reparse, or remove a source.
@@ -150,8 +162,8 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 | PDF | `.pdf` | per-page text, scanned-page OCR, page images | page number |
 | PowerPoint | `.pptx` | slide text, notes, images, structure | slide number |
 | Images | `.png` `.jpg` `.webp` `.tiff`, etc. | OCR and optional vision analysis | original image and retained asset |
-| Audio | `.mp3` `.m4a` `.wav` `.flac`, etc. | Whisper transcription | start/end timestamp |
-| Video | `.mp4` `.mov` `.mkv` `.webm`, etc. | FFmpeg, Whisper, keyframes | timeline and keyframe |
+| Audio | `.mp3` `.m4a` `.wav` `.flac`, etc. | preflight, PCM16 normalization, VAD, Qwen3-ASR/Whisper, optional diarization | segment/word time and speaker |
+| Video | `.mp4` `.mov` `.mkv` `.webm`, etc. | FFmpeg audio, VAD, Qwen3-ASR/Whisper, optional diarization and keyframes | timeline, speaker, and keyframe |
 | Web/media URL | `https://...` | article extraction, snapshot, or authentic media download | URL, snapshot, timestamp |
 | Weixin public article | `mp.weixin.qq.com/s/...` | dedicated title/body extraction and challenge-page blocking | article URL, body snapshot |
 | Public video platform | YouTube, Bilibili, Douyin, Xiaohongshu, X | public subtitles first; public-media transcription as fallback | original URL, subtitle, timeline |
@@ -163,7 +175,9 @@ PySide6 Desktop UI
         │
         ├── IngestionService
         │   ├── Document / PDF / PPT / image parsers
-        │   ├── OCR / Whisper / FFmpeg
+        │   ├── OCR / FFmpeg / audio preflight and normalization / VAD
+        │   ├── ASR Router (Qwen3-ASR / MLX Whisper / faster-whisper)
+        │   ├── Optional diarization / Transcript V2 / quality gate
         │   ├── Authenticity and completeness quality gate
         │   └── Reproducible Source Package archive
         │
@@ -211,21 +225,35 @@ pip install -e '.[desktop,semantic]'
 Optional accelerators:
 
 ```bash
-# MLX Whisper on Apple Silicon
+# Qwen3-ASR and MLX Whisper runtimes on Apple Silicon
 pip install -e '.[apple-media]'
+
+# Optional speaker-diarization runtimes
+pip install -e '.[speaker]'
 
 # PP-StructureV3 for tables, formulas, and multi-column scans
 # First install PaddlePaddle 3.0+ for your platform: https://www.paddlepaddle.org.cn/install/quick
 pip install -e '.[layout-ocr]'
 ```
 
-The `full` extra includes the public-platform connector and a standalone faster-whisper runtime; source builds can add MLX with `.[apple-media]`. Official macOS Apple Silicon bundles include MLX automatically, so users do not need to install it separately. PaddleOCR remains an optional professional-layout component. `layout-ocr` includes PP-StructureV3's document-parser dependencies, while PaddlePaddle itself must match the operating system and CPU/CUDA platform. Once installed, the application automatically prefers these components, and diagnostics verify PaddleOCR, PaddleX, and PaddlePaddle together instead of reporting a shell-only installation as ready. Missing capabilities are reported in **Help → System Diagnostics** and never silently presented as success.
+The `full` extra includes the public-platform connector and faster-whisper runtime. Source builds can add Qwen3-ASR/MLX Whisper runtimes with `.[apple-media]` and optional diarization backends with `.[speaker]`. Official macOS Apple Silicon bundles may include MLX inference runtimes, but no ASR or diarization model weights ship in an application package. PaddleOCR remains an optional professional-layout component. `layout-ocr` includes PP-StructureV3's document-parser dependencies, while PaddlePaddle itself must match the operating system and CPU/CUDA platform. Missing capabilities are reported in **Help → System Diagnostics** and never silently presented as success.
 
 ### Configure answer providers
 
 Open **Settings → Models & Privacy** and enter a DeepSeek or Kimi API key. Keys are never returned by status APIs, written to SQLite, included in diagnostics, or copied into backups.
 
 Without an API key, ingestion, local search, and the offline extractive answer provider remain available.
+
+### Configure local transcription models
+
+Open **Settings → Multimedia Parsing**, choose a profile, Provider, model, primary language, context terms, word timestamps, and optional speaker-count range. The same page manages three-level technical glossaries; select **Manage local models…** to install or register weights:
+
+- `Qwen3-ASR 1.7B`: the high-accuracy profile for Chinese meetings, courses, and technical material, approximately 2.2 GB;
+- `Qwen3-ASR 0.6B`: a speed- and memory-oriented preview profile, approximately 0.9 GB;
+- Whisper: `tiny / base / small / medium / large-v3`, with Apple MLX and faster-whisper CTranslate2 weights managed separately and never mixed;
+- pyannote Community-1: an optional local diarization model whose upstream terms must be accepted on Hugging Face before obtaining weights.
+
+The model manager can register an existing model directory, copy it into managed storage, or start a download only after an explicit user action. Merely inspecting status, starting the app, or importing media does not download a model. A missing selected weight produces a clear install/register/switch-route message. Media ingestion currently processes existing local files or lawfully obtained media; it does not provide microphone capture, live recording, or real-time streaming transcription.
 
 ## CLI
 
@@ -260,7 +288,8 @@ AI-Jingjing/
 ├── archive/       Originals, web snapshots, and Source Packages
 ├── notes/         Source Notes, governed knowledge, saved answers, workshop artifacts
 ├── assets/        PDF/PPT pages, images, and video keyframes
-├── transcripts/   Audio/video transcripts
+├── transcripts/   Transcript V2, subtitles, and compatibility transcript formats
+├── models/        Explicitly managed ASR and diarization model weights
 ├── cache/models/  Local semantic-model cache
 ├── backups/       Validated backups
 ├── trash/         Recoverable material
@@ -280,6 +309,7 @@ Use `AI_JINGJING_DATA_DIR` or the `--data-dir` option to select another director
 | Operation | Cloud call | Data sent |
 |---|---:|---|
 | Chunking, SQLite, FTS5, local semantic search | No | None |
+| Audio preflight, VAD, local ASR, diarization, playback, correction | No | None |
 | Local extractive answer | No | None |
 | DeepSeek/Kimi answer | Yes | question, bounded conversation context, retrieved evidence chunks, and images explicitly attached by the user |
 | DeepSeek knowledge synthesis | Yes | bounded extracted text from the current import |
@@ -296,7 +326,7 @@ pip install pytest
 pytest -q
 ```
 
-Version 2.2.0 includes 205 automated tests plus 40 subtests covering chunking, atomic indexing, database migrations, governed knowledge, recoverable trash, graph relations and lifecycle, health checks, structured OCR and confidence gates, MLX/CUDA/CPU transcription routing and immediate cancellation, staged subtitle/derived artifacts, public-download streaming limits, HLS/live/protocol boundaries, dual raw-evidence/parse-version archive digests, content-addressed evidence and rollback, missing-evidence repair, persistent cleanup retries, model selection, real streaming output, clipboard images and multimodal requests, adaptive context, evidence quality, prompt-injection defenses, persistent conversations, resumable ingestion, citations, fail-closed PDF/Office/image privacy inspection and safe sharing, mutually exclusive database-wide operations, backup restore, secure updates, and desktop behavior.
+Version 2.3.0 includes 300 automated tests and 42 additional subtests (with one optional-component test skipped conditionally), covering ASR Provider routing, local model lifecycle and content verification, audio preflight/normalization/VAD, persistent crash recovery, Qwen3-ASR/Whisper fallback, scoped glossaries, diarization, Transcript V2, deferred-index quality gating, playback, human correction, evidence-layered synthesis, and indexing bridges, as well as chunking, atomic indexing, database migrations, knowledge governance, OCR, public-media safety, content-addressed archives, privacy sharing, backup restore, and desktop behavior.
 
 The repository also includes a local golden-set evaluation framework for Hit Rate@K, MRR, Citation Precision, and Citation Coverage. Replace the placeholder document and chunk IDs in the example with IDs from your own library, then run `knowledge eval`; add `--retrieval-only` to evaluate retrieval without answer generation.
 
@@ -322,8 +352,9 @@ GitHub Actions runs tests on Linux, macOS, and Windows and produces unsigned mac
 
 ```text
 src/media_knowledge/
-├── desktop/       PySide6 application, controller, diagnostics, privacy sharing, updates
-├── ingestion/     Multimodal extraction, OCR, transcription, public video, quality gate, archive
+├── desktop/       PySide6 app, model manager, player, transcript editor, diagnostics, updates
+├── ingestion/     Multimodal extraction, audio pipeline, ASR/diarization routing, OCR, gates, archive
+├── transcripts/   Transcript V2, quality evaluation, correction audit, persistence
 ├── chunking/      Media-aware chunking
 ├── embedding/     Local semantic and compatible embeddings
 ├── retrieval/     Vector, FTS5, fusion, reranking
@@ -337,6 +368,7 @@ src/media_knowledge/
 - Login-protected, DRM-protected, or anti-bot media pages are ingested only after the authentic body or media stream has been obtained.
 - The public-platform connector uses an exact hostname allowlist and never reads cookies, browser sessions, netrc, or proxies, or bypasses login, region, or permission controls.
 - AI synthesis never replaces original evidence; important pages and originals stay archived.
+- Model weights do not ship in application packages and download only after an explicit model-manager action. This release does not support microphone capture, live recording, or real-time streaming transcription.
 - The project does not bypass access control. Import only material you are authorized to process.
 - No open-source license is included yet. Usage and redistribution remain subject to a future declaration by the repository owner.
 

@@ -167,13 +167,35 @@ class MediaAwareChunker:
     def _temporal(
         self, segments: Iterable[ContentSegment]
     ) -> list[tuple[str, str, list[str], SourceReference | None, dict[str, Any]]]:
-        ordered = [segment for segment in sorted(segments, key=lambda item: (item.sequence, item.id)) if segment.retrieval_text]
+        ordered = [
+            segment
+            for segment in sorted(segments, key=lambda item: (item.sequence, item.id))
+            if self._temporal_text(segment)
+        ]
         groups: list[list[ContentSegment]] = []
         current: list[ContentSegment] = []
         for segment in ordered:
             start = segment.location.get("timestamp_start")
             previous_end = current[-1].location.get("timestamp_end") if current else None
             group_start = current[0].location.get("timestamp_start") if current else None
+            current_speaker = next(
+                (self._speaker_id(item) for item in reversed(current) if self._speaker_id(item)),
+                None,
+            )
+            incoming_speaker = self._speaker_id(segment)
+            speaker_changed = bool(
+                current
+                and incoming_speaker
+                and current_speaker
+                and incoming_speaker != current_speaker
+            )
+            quality_changed = bool(
+                current
+                and self._quality_status(segment) != self._quality_status(current[-1])
+            )
+            modality_changed = bool(
+                current and segment.modality != current[-1].modality
+            )
             section_changed = bool(
                 current
                 and segment.location.get("section")
@@ -181,8 +203,16 @@ class MediaAwareChunker:
             )
             gap = start - previous_end if isinstance(start, (int, float)) and isinstance(previous_end, (int, float)) else 0
             span = start - group_start if isinstance(start, (int, float)) and isinstance(group_start, (int, float)) else 0
-            candidate_tokens = estimate_tokens("\n".join(item.retrieval_text for item in [*current, segment]))
-            if current and (gap > 8 or span > self.max_time_span or section_changed or candidate_tokens > self.target_tokens):
+            candidate_tokens = estimate_tokens("\n".join(self._temporal_text(item) for item in [*current, segment]))
+            if current and (
+                speaker_changed
+                or quality_changed
+                or modality_changed
+                or gap > 8
+                or span > self.max_time_span
+                or section_changed
+                or candidate_tokens > self.target_tokens
+            ):
                 groups.append(current)
                 current = []
             current.append(segment)
@@ -191,26 +221,131 @@ class MediaAwareChunker:
 
         pieces = []
         for group_index, members in enumerate(groups):
-            text = "\n".join(member.retrieval_text for member in members)
+            body = "\n".join(self._temporal_text(member) for member in members if self._temporal_text(member))
             starts = [member.location.get("timestamp_start") for member in members]
             ends = [member.location.get("timestamp_end") for member in members]
             start = next((float(value) for value in starts if isinstance(value, (int, float))), None)
             end = next((float(value) for value in reversed(ends) if isinstance(value, (int, float))), start)
+            speaker_ids = list(
+                dict.fromkeys(
+                    speaker for member in members if (speaker := self._speaker_id(member))
+                )
+            )
+            speaker_names = list(
+                dict.fromkeys(
+                    name for member in members if (name := self._speaker_name(member))
+                )
+            )
+            speaker_label = speaker_names[0] if len(speaker_names) == 1 else (
+                speaker_ids[0] if len(speaker_ids) == 1 else ""
+            )
+            # This is the text sent to lexical/vector indexing.  A human speaker
+            # label improves “who said what” retrieval, while timestamps stay in
+            # provenance metadata so repeated numbers do not pollute embeddings.
+            text = f"{speaker_label}：{body}" if speaker_label else body
             heading = next((member.heading_path for member in members if member.heading_path), [])
             reference = replace(
                 self._segment_reference(members[0]), timestamp_start=start, timestamp_end=end
             )
             member_key = ",".join(member.id for member in members)
+            run_ids = list(
+                dict.fromkeys(
+                    run_id for member in members if (run_id := self._asr_run_id(member))
+                )
+            )
+            quality_status = self._quality_status(members[0])
+            quality_flags = list(
+                dict.fromkeys(
+                    str(flag)
+                    for member in members
+                    for flag in self._quality_flags(member)
+                    if str(flag)
+                )
+            )
+            display_label = speaker_label or "未知说话人"
+            display_text = (
+                f"[{self._display_timestamp(start)}] {display_label}\n{body}"
+                if start is not None
+                else f"{display_label}\n{body}"
+            )
             pieces.append(
                 (
-                    f"time:{start}:{end}:members:{member_key}:group:{group_index}",
+                    f"time:{start}:{end}:speaker:{','.join(speaker_ids) or '-'}:quality:{quality_status}:members:{member_key}:group:{group_index}",
                     text,
                     list(heading),
                     reference,
-                    {"segment_ids": [member.id for member in members], "time_span": [start, end]},
+                    {
+                        "segment_ids": [member.id for member in members],
+                        "time_span": [start, end],
+                        "timestamp_start": start,
+                        "timestamp_end": end,
+                        "speaker_ids": speaker_ids,
+                        "speaker_names": speaker_names,
+                        "asr_run_ids": run_ids,
+                        "asr_run_id": run_ids[0] if len(run_ids) == 1 else None,
+                        "quality_status": quality_status,
+                        "quality_flags": quality_flags,
+                        "overlap": any(bool(member.metadata.get("overlap")) for member in members),
+                        "display_text": display_text,
+                    },
                 )
             )
         return pieces
+
+    @staticmethod
+    def _speaker_id(segment: ContentSegment) -> str | None:
+        value = segment.metadata.get("speaker_id") or segment.location.get("speaker_id")
+        if value is None and segment.metadata.get("speaker"):
+            value = segment.metadata.get("speaker")
+        compact = str(value or "").strip()
+        return compact or None
+
+    @staticmethod
+    def _speaker_name(segment: ContentSegment) -> str | None:
+        value = (
+            segment.metadata.get("speaker_name")
+            or segment.metadata.get("display_name")
+            or segment.location.get("speaker_name")
+        )
+        compact = str(value or "").strip()
+        return compact or None
+
+    @staticmethod
+    def _quality_status(segment: ContentSegment) -> str:
+        value: object = segment.metadata.get("quality_status", "pass")
+        if isinstance(segment.metadata.get("quality"), dict):
+            value = segment.metadata["quality"].get("status", value)  # type: ignore[union-attr]
+        compact = str(value or "pass").strip().casefold()
+        return compact if compact in {"pass", "review", "fail"} else "review"
+
+    @staticmethod
+    def _quality_flags(segment: ContentSegment) -> list[object]:
+        value = segment.metadata.get("quality_flags", [])
+        if isinstance(value, (tuple, list, set)):
+            return list(value)
+        return [value] if value else []
+
+    @staticmethod
+    def _asr_run_id(segment: ContentSegment) -> str | None:
+        value = segment.metadata.get("asr_run_id") or segment.metadata.get("run_id")
+        compact = str(value or "").strip()
+        return compact or None
+
+    @staticmethod
+    def _temporal_text(segment: ContentSegment) -> str:
+        # ContentSegment.retrieval_text historically appends an English
+        # ``Speaker:`` line.  Speaker-aware chunks add one stable label at the
+        # chunk boundary instead, avoiding repeated labels and timestamp noise.
+        return "\n".join(
+            value for value in (segment.text.strip(), segment.description.strip()) if value
+        )
+
+    @staticmethod
+    def _display_timestamp(value: float | None) -> str:
+        seconds = max(0, int(value or 0))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def _image(
         self, segments: Iterable[ContentSegment]

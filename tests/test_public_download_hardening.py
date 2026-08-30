@@ -11,6 +11,11 @@ from unittest.mock import patch
 
 from media_knowledge.embedding import HashEmbeddingProvider
 from media_knowledge.indexing import IndexingService
+from media_knowledge.ingestion.audio import (
+    AudioNormalizationResult,
+    AudioPreparationResult,
+    AudioProbeResult,
+)
 from media_knowledge.ingestion.extractors import (
     AudioVideoExtractor,
     DirectMediaURLExtractor,
@@ -879,6 +884,25 @@ class PublicDownloadHardeningTests(unittest.TestCase):
             paths = ProductPaths.resolve(Path(temporary) / "data").ensure()
             video = Path(temporary) / "video.mp4"
             video.write_bytes(b"video-source")
+            normalized = Path(temporary) / "normalized.wav"
+            normalized.write_bytes(b"fake-wav")
+            prepared = AudioPreparationResult(
+                probe=AudioProbeResult(
+                    source=str(video),
+                    duration_seconds=4,
+                    sample_rate=16_000,
+                    channels=1,
+                    codec="pcm_s16le",
+                    bit_rate=None,
+                    format_name="wav",
+                    decode_ok=True,
+                ),
+                normalized=AudioNormalizationResult(
+                    path=str(normalized),
+                    duration_seconds=4,
+                ),
+                vad_segments=(),
+            )
             service = IngestionService(
                 paths,
                 settings=DesktopSettings(
@@ -895,8 +919,8 @@ class PublicDownloadHardeningTests(unittest.TestCase):
                 "media_knowledge.ingestion.extractors.subprocess.run",
                 side_effect=fake_ffmpeg,
             ), patch(
-                "media_knowledge.ingestion.extractors._wav_duration",
-                return_value=4,
+                "media_knowledge.ingestion.extractors.prepare_audio",
+                return_value=prepared,
             ), patch(
                 "media_knowledge.ingestion.extractors.transcribe_audio",
                 return_value=transcription,

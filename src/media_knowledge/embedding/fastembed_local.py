@@ -4,13 +4,15 @@ from pathlib import Path
 import warnings
 
 from .base import EmbeddingProvider
+from ..resource_scheduler import LOCAL_HEAVY_TASKS
 
 
 class FastEmbedProvider(EmbeddingProvider):
-    """Lazy, CPU-only semantic embeddings backed by ONNX Runtime.
+    """Lazy, CPU-only semantic embeddings backed by an installed ONNX model.
 
-    The model is downloaded into the product cache on first use rather than being
-    duplicated inside every application update.
+    Knowledge ingestion and retrieval are execution paths, not model installers.
+    They therefore always ask FastEmbed for local files only.  This prevents a
+    first document import from unexpectedly opening a network connection.
     """
 
     name = "fastembed"
@@ -21,10 +23,12 @@ class FastEmbedProvider(EmbeddingProvider):
         *,
         cache_dir: str | Path | None = None,
         threads: int | None = None,
+        local_files_only: bool = True,
     ) -> None:
         self.model = model
         self.cache_dir = Path(cache_dir).expanduser().resolve() if cache_dir else None
         self.threads = threads
+        self.local_files_only = bool(local_files_only)
         self._backend = None
 
     def _load(self):
@@ -47,10 +51,12 @@ class FastEmbedProvider(EmbeddingProvider):
                     model_name=self.model,
                     cache_dir=str(self.cache_dir) if self.cache_dir else None,
                     threads=self.threads,
+                    local_files_only=self.local_files_only,
                 )
         except Exception as exc:
             raise RuntimeError(
-                "本地语义模型尚未准备完成。请检查网络后重试；模型下载一次后即可离线使用。"
+                "本地语义模型尚未安装或校验失败。正式导入不会联网下载模型；"
+                "请先显式准备 FastEmbed 模型，或在设置中切换为本地哈希检索。"
             ) from exc
         return self._backend
 
@@ -59,6 +65,10 @@ class FastEmbedProvider(EmbeddingProvider):
             return []
         backend = self._load()
         try:
-            return [vector.astype("float32").tolist() for vector in backend.embed(texts, batch_size=16)]
+            with LOCAL_HEAVY_TASKS.reserve("embedding:fastembed"):
+                return [
+                    vector.astype("float32").tolist()
+                    for vector in backend.embed(texts, batch_size=16)
+                ]
         except Exception as exc:
             raise RuntimeError("本地语义模型生成向量失败") from exc

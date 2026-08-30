@@ -193,6 +193,34 @@ class DesktopConversationTests(unittest.TestCase):
                 window.close()
                 application.processEvents()
 
+    def test_faster_whisper_selection_never_receives_mlx_model_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = DesktopController(Path(temporary) / "data", migrate_legacy=False)
+            mlx_model = Path(temporary) / "whisper-large-v3-mlx"
+            mlx_model.mkdir()
+            (mlx_model / "config.json").write_text("{}", encoding="utf-8")
+            (mlx_model / "weights.npz").write_bytes(b"mlx-weights")
+            controller.local_models.register_path("whisper-large-v3-mlx", mlx_model)
+            application, window = create_application(controller.paths.root)
+            dialog = SettingsDialog(controller, window)
+            try:
+                dialog.transcription_profile.setCurrentIndex(
+                    dialog.transcription_profile.findData("custom")
+                )
+                dialog.asr_provider.setCurrentIndex(
+                    dialog.asr_provider.findData("faster-whisper")
+                )
+                dialog.asr_model.setCurrentIndex(dialog.asr_model.findData("large-v3"))
+                dialog.persist()
+                self.assertEqual(controller.settings.asr_provider, "faster-whisper")
+                self.assertEqual(controller.settings.asr_model, "large-v3")
+                self.assertIsNone(controller.settings.asr_model_path)
+                self.assertIsNone(controller.settings.asr_model_sha256)
+            finally:
+                dialog.close()
+                window.close()
+                application.processEvents()
+
     def test_two_turns_restore_send_button_and_reuse_conversation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

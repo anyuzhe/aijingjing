@@ -13,7 +13,7 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
   install_extras="full,apple-media"
 fi
 "$runtime_dir/bin/pip" install -e "$project_root[$install_extras]"
-"$runtime_dir/bin/python" -m unittest discover -s "$project_root/tests" -v
+QT_QPA_PLATFORM=offscreen "$runtime_dir/bin/python" -m pytest -q "$project_root/tests"
 QT_QPA_PLATFORM=offscreen "$runtime_dir/bin/python" "$project_root/scripts/make_icons.py"
 "$runtime_dir/bin/pyinstaller" --noconfirm --clean "$project_root/packaging/AI-Jingjing.spec"
 

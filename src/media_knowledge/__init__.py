@@ -5,4 +5,4 @@ from .qa.engine import KnowledgeQAEngine
 from .retrieval.hybrid import KnowledgeRetriever
 
 __all__ = ["IndexingService", "KnowledgeRetriever", "KnowledgeQAEngine"]
-__version__ = "2.2.0"
+__version__ = "2.3.0"
