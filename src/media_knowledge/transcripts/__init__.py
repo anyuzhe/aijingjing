@@ -3,6 +3,18 @@ from .correction import (
     apply_confirmed_corrections,
     suggest_glossary_corrections,
 )
+from .deep_repository import (
+    CORRECTION_CHANGE_STATUSES,
+    CORRECTION_EVIDENCE_TYPES,
+    CORRECTION_RUN_STATUSES,
+    CorrectionChangeEventRecord,
+    CorrectionChangeRecord,
+    CorrectionEvidenceRecord,
+    CorrectionParagraphRecord,
+    DeepCorrectionRepository,
+    DeepCorrectionRunRecord,
+)
+from .exporter import DeepCorrectionMarkdownExporter, MarkdownExportResult
 from .quality import (
     TranscriptQualityIssue,
     TranscriptQualityReport,
@@ -37,15 +49,26 @@ from .schema import (
 
 __all__ = [
     "GLOSSARY_SCOPES",
+    "CORRECTION_CHANGE_STATUSES",
+    "CORRECTION_EVIDENCE_TYPES",
+    "CORRECTION_RUN_STATUSES",
     "QUALITY_STATUSES",
     "RUN_STATUSES",
     "SPEAKER_NAME_SOURCES",
     "TRANSCRIPT_V1_FORMAT",
     "TRANSCRIPT_V2_FORMAT",
     "CorrectionSuggestion",
+    "CorrectionChangeEventRecord",
+    "CorrectionChangeRecord",
+    "CorrectionEvidenceRecord",
+    "CorrectionParagraphRecord",
+    "DeepCorrectionMarkdownExporter",
+    "DeepCorrectionRepository",
+    "DeepCorrectionRunRecord",
     "Glossary",
     "GlossaryTerm",
     "GlossaryTermInput",
+    "MarkdownExportResult",
     "TranscriptEdit",
     "TranscriptQuality",
     "TranscriptQualityIssue",

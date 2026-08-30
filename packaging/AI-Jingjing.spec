@@ -54,6 +54,13 @@ if module_available("mlx"):
     # Python import analysis alone does not reliably preserve these files.
     datas += collect_data_files("mlx")
     binaries += collect_dynamic_libs("mlx")
+if module_available("sherpa_onnx"):
+    # Speaker diarization is loaded behind the provider registry.  Preserve
+    # both its Python API and native ONNX Runtime/C++ libraries in the frozen
+    # application; model weights remain user-managed and are never bundled.
+    hiddenimports += collect_submodules("sherpa_onnx")
+    datas += collect_data_files("sherpa_onnx")
+    binaries += collect_dynamic_libs("sherpa_onnx")
 icon_candidate = project_root / "packaging" / (
     "AI-Jingjing.icns" if sys.platform == "darwin" else "AI-Jingjing.ico"
 )
@@ -93,8 +100,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleDisplayName": "AI知识库-AI静静",
             "CFBundleName": "AI静静",
-            "CFBundleShortVersionString": "2.3.0",
-            "CFBundleVersion": "2.3.0",
+            "CFBundleShortVersionString": "2.4.0",
+            "CFBundleVersion": "2.4.0",
             "NSHighResolutionCapable": True,
         },
     )

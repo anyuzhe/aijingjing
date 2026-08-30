@@ -1,5 +1,33 @@
 # Changelog / 更新日志
 
+## 2.4.0 — 2026-08-30
+
+### 中文
+
+- 新增完整深度语义精校链路：在不可变 `Transcript V2` 原稿之上执行异常扫描、连续重叠分块、跨片段语义校正、术语/实体一致化和保守不确定标注，绝不覆盖 `raw_text`。
+- 新增重复循环、低置信、静音幻觉、截断、专业术语和数字单位等异常检测；只对异常时间区间执行可选局部重识别，可在 Whisper Large-v3、Qwen3-ASR 1.7B 与 0.6B 之间切换首轮和复核路线。
+- 深度精校严格保留 `segment_id`、时间范围和说话人映射；拒绝缺片段、越界时间、编造定位、伪造引用和结构不完整的 LLM JSON 输出。
+- 新增逐条校订审计与人工接受/拒绝：每项保存修改前后、原因、置信度、关联异常和证据；支持进度、取消、检查点恢复，并保持说话人匿名标签和人工身份命名的边界。
+- 新增显式联网的外部证据核验。功能默认关闭；开启后网页内容仍视为不可信数据，只接受已注入证据 ID、原 URL 和逐字存在于摘录中的引用。证据不足时标记待核实、听辨不清或 ASR 解码失败，不为流畅度编造事实。
+- 新增深度精校 Markdown 产物，可包含完整时间轴、说话人、章节、术语待核实表、校订审计、知识卡片和 Mermaid 知识结构图。
+- 跨平台正式包纳入 `sherpa-onnx` 运行时，支持无门禁的双 ONNX 说话人模型登记、SHA-256 校验、纯本地推理与路线诊断；权重仍由用户显式安装。
+- 导出稿新增全量“原稿 / 精校稿差异审计”，逐条列出时间、说话人、修改前后、状态、置信度、证据数和理由。
+- macOS Apple Silicon 构建脚本现在安装 `full,apple-media`，把 MLX/Qwen 推理依赖纳入正式应用；Intel macOS、Windows 与 Linux 保持跨平台 `full` 依赖。构建不会下载或捆绑任何模型权重。
+- 更新中英文 README，明确深度精校的数据流、模型依赖、说话人边界、外部联网行为、原稿不可变原则和云端数据最小化范围。
+
+### English
+
+- Added the complete semantic deep-correction pipeline above immutable `Transcript V2` facts: issue scanning, continuous overlapping chunks, cross-segment semantic correction, term/entity consistency, and conservative uncertainty labels without overwriting `raw_text`.
+- Added detection for repetition loops, low confidence, silence hallucinations, truncation, technical terms, and numbers/units. Optional re-recognition reruns only suspicious intervals, with independently selectable Whisper Large-v3, Qwen3-ASR 1.7B, and Qwen3-ASR 0.6B routes for the first and review passes.
+- Enforced exact preservation of `segment_id`, time ranges, and speaker mappings. Missing segments, out-of-bounds times, invented locators, fabricated citations, and malformed structured LLM JSON are rejected.
+- Added per-change audit and human accept/reject controls. Every proposal retains before/after text, reason, confidence, detected issues, and evidence, with progress, cancellation, checkpoint resume, anonymous speaker labels, and explicit human identity naming.
+- Added opt-in external-evidence verification, disabled by default. Web content remains untrusted data, and citations must match an injected evidence ID, original URL, and verbatim snippet quote. Insufficient support produces needs-verification, inaudible, or ASR-decode-failure markers rather than invented facts.
+- Added deep-correction Markdown artifacts with complete timelines, speakers, chapters, unresolved-term tables, correction audits, knowledge cards, and Mermaid knowledge diagrams.
+- Added the `sherpa-onnx` runtime to portable release builds, with dual-ONNX bundle registration, SHA-256 verification, fully local inference, and route diagnostics. Model weights remain an explicit user installation.
+- Added a complete raw-versus-corrected audit table to Markdown exports, including time, speaker, before/after text, decision, confidence, evidence count, and rationale for every proposal.
+- macOS Apple Silicon builds now install `full,apple-media` so official packages contain the MLX/Qwen inference dependencies. Intel macOS, Windows, and Linux retain the portable `full` extra. Builds neither download nor bundle model weights.
+- Expanded both READMEs with the correction data flow, model dependencies, speaker boundaries, explicit network behavior, immutable-source policy, and cloud data-minimization boundary.
+
 ## 2.3.0 — 2026-08-30
 
 ### 中文

@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-300-2F855A" alt="300 tests">
-    <img src="https://img.shields.io/badge/Version-2.3.0-4C8FBF" alt="Version 2.3.0">
+    <img src="https://img.shields.io/badge/Test-pytest-2F855A" alt="pytest">
+    <img src="https://img.shields.io/badge/Version-2.4.0-4C8FBF" alt="Version 2.4.0">
   </p>
 </div>
 
@@ -72,7 +72,38 @@ A restricted video page that exposes only a cover and description is rejected in
 
 Review/fail transcripts retain their source and Transcript V2 facts but create neither FTS nor vector entries until a human correction and approval atomically builds the deferred index. AI knowledge synthesis is a separate derived layer that must distinguish confirmed facts, unverified inference, disputes, decisions, and action items and rejects page/timestamp locators absent from the source.
 
-### 3. Governed knowledge lifecycle
+### 3. Full semantic deep correction
+
+Deep correction does not hand an entire transcript to a model for an unconstrained rewrite. It creates a resumable, auditable derived layer above the immutable recognition facts:
+
+```text
+Transcript V2 recognition facts (read-only)
+        ↓
+Issue scan: repetition / low confidence / silence hallucination / truncation / terms / numbers
+        ↓
+Continuous chunks with overlapping context
+        ↓
+Optional interval re-recognition with Large-v3 or Qwen3-ASR
+        ↓
+Strict structured LLM correction across segment boundaries
+        ↓
+Optional external-evidence verification (explicit network opt-in)
+        ↓
+Per-change proposal, evidence, reason, confidence, and accept/reject audit
+        ↓
+Speaker Markdown / chapters / knowledge cards / Mermaid knowledge graph
+```
+
+- Select `Whisper large-v3`, `Qwen3-ASR 1.7B`, or `Qwen3-ASR 0.6B`. The initial pass and suspicious-interval re-recognition may use different routes, so a stronger model can revisit only difficult ranges instead of rerunning the whole recording.
+- Optional diarization retains anonymous `S1/S2/...` labels, time ranges, and overlapping speech. Human renaming, merging, and reassignment never rewrite raw ASR facts. The application does not infer a real person's identity from an anonymous voice label.
+- LLM output must be strict structured JSON and preserve every `segment_id`, start/end time, and speaker mapping. Missing segments, out-of-bounds locators, invented timestamps, ungrounded quotes, and silent deletion are rejected.
+- External verification is off by default. When explicitly enabled, only bounded queries are sent to the search provider. Web text is always untrusted data: the model may cite only injected evidence IDs, original URLs, and quotes that occur verbatim in the supplied snippet, and it may not follow instructions found on a page. When support is insufficient, the original meaning is retained with `［needs verification］`, `［term needs verification］`, `［inaudible］`, or `［ASR decode failure］` instead of filling gaps for fluency.
+- Every proposal stores `before / after / reason / confidence / evidence` and can be accepted or rejected individually. Original `raw_text` is never overwritten; accepted changes enter a separate correction layer, and checkpoints support progress, cancellation, and resume.
+- Markdown exports can include the complete timeline, speakers, chapters, unresolved terms, a full raw-versus-corrected audit table, knowledge cards, and a Mermaid diagram. Knowledge synthesis remains a derived artifact, never a replacement for the transcript.
+
+Model weights are not bundled. Large-v3, Qwen3-ASR, and diarization weights must be downloaded explicitly in the model manager or registered from an existing local directory. Missing weights never trigger a silent download or a false successful re-recognition result.
+
+### 4. Governed knowledge lifecycle
 
 - Map every imported document to a `source` item and every workshop artifact to an `output` item.
 - Support six formal types: source, topic, entity, analysis, decision, and output.
@@ -83,7 +114,7 @@ Review/fail transcripts retain their source and Transcript V2 facts but create n
 - Run health checks for orphaned items, missing provenance, empty bodies, staleness, inconsistent tags, alias collisions, and uncompiled high-value sources, with actionable recovery guidance.
 - Atomically preserve a tombstone, Markdown note, aliases, tags, and graph edges before deletion; restore the original item ID and every still-valid relation from **Knowledge → Trash** without deleting source material.
 
-### 4. Local semantic retrieval
+### 5. Local semantic retrieval
 
 - SQLite FTS5 full-text retrieval;
 - local multilingual semantic embeddings;
@@ -95,7 +126,7 @@ Review/fail transcripts retain their source and Transcript V2 facts but create n
 
 Search does not call an LLM. The first semantic search downloads an approximately 240 MB ONNX model; subsequent searches can run offline.
 
-### 5. Multi-turn, citation-grounded Q&A
+### 6. Multi-turn, citation-grounded Q&A
 
 - Continue asking follow-up questions in the same conversation.
 - Persist, search, reopen, rename, delete, and export conversations as Markdown.
@@ -116,7 +147,7 @@ Retrieved text is always serialized as untrusted evidence data. Instruction-like
 
 Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence model. Once DeepSeek is configured, the image-capable experimental `deepseek-v4-flash-vision-exp` model is selected by default. Retrieval itself remains local and model-independent.
 
-### 6. Source reading and knowledge management
+### 7. Source reading and knowledge management
 
 - Read PDF pages, images, extracted text, and media timelines inside the app.
 - Open the built-in player from an answer citation or transcript segment at the exact timestamp, highlight the active cue during playback, change speed, or hand the original file to the system application.
@@ -128,7 +159,7 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 - Detect duplicate content fingerprints.
 - Preserve archived originals when a searchable record is removed.
 
-### 7. Automation and knowledge workshop
+### 8. Automation and knowledge workshop
 
 - Watch one or more folders and ingest changes incrementally.
 - Persist every import batch and per-file stage, progress, error, and structured result.
@@ -138,7 +169,7 @@ Answer providers include DeepSeek, Kimi, and a fully offline extractive evidence
 - Optionally sync from Obsidian or export AI Jingjing notes to a vault.
 - Generate reports, cross-source comparisons, timelines, quizzes, flashcards, and mind-map outlines from selected evidence.
 
-### 8. Local data security
+### 9. Local data security
 
 - Keep documents, chunks, conversations, answers, evidence, and citations in local SQLite.
 - Store API keys in macOS Keychain or the platform credential store when available.
@@ -178,6 +209,10 @@ PySide6 Desktop UI
         │   ├── OCR / FFmpeg / audio preflight and normalization / VAD
         │   ├── ASR Router (Qwen3-ASR / MLX Whisper / faster-whisper)
         │   ├── Optional diarization / Transcript V2 / quality gate
+        │   ├── DeepCorrectionService
+        │   │   ├── Issue detection / overlap chunks / interval re-recognition
+        │   │   ├── Structured correction / entity consistency / conservative uncertainty
+        │   │   └── Evidence audit / per-change review / Markdown knowledge artifacts
         │   ├── Authenticity and completeness quality gate
         │   └── Reproducible Source Package archive
         │
@@ -236,7 +271,9 @@ pip install -e '.[speaker]'
 pip install -e '.[layout-ocr]'
 ```
 
-The `full` extra includes the public-platform connector and faster-whisper runtime. Source builds can add Qwen3-ASR/MLX Whisper runtimes with `.[apple-media]` and optional diarization backends with `.[speaker]`. Official macOS Apple Silicon bundles may include MLX inference runtimes, but no ASR or diarization model weights ship in an application package. PaddleOCR remains an optional professional-layout component. `layout-ocr` includes PP-StructureV3's document-parser dependencies, while PaddlePaddle itself must match the operating system and CPU/CUDA platform. Missing capabilities are reported in **Help → System Diagnostics** and never silently presented as success.
+The `full` extra includes the public-platform connector, faster-whisper, and the lightweight Sherpa-ONNX diarization runtime. Source builds can add Qwen3-ASR/MLX Whisper with `.[apple-media]` and the pyannote backend with `.[speaker]`. Official macOS Apple Silicon bundles may include MLX inference runtimes, but no ASR or diarization model weights ship in an application package. PaddleOCR remains an optional professional-layout component. `layout-ocr` includes PP-StructureV3's document-parser dependencies, while PaddlePaddle itself must match the operating system and CPU/CUDA platform. Missing capabilities are reported in **Help → System Diagnostics** and never silently presented as success.
+
+`scripts/build_desktop.sh` detects the build architecture. On macOS arm64 it installs `full,apple-media`, ensuring the packaged application contains the MLX/Qwen runtimes; Intel macOS, Windows, and Linux retain the portable `full` dependency set. The script never downloads model weights.
 
 ### Configure answer providers
 
@@ -251,9 +288,10 @@ Open **Settings → Multimedia Parsing**, choose a profile, Provider, model, pri
 - `Qwen3-ASR 1.7B`: the high-accuracy profile for Chinese meetings, courses, and technical material, approximately 2.2 GB;
 - `Qwen3-ASR 0.6B`: a speed- and memory-oriented preview profile, approximately 0.9 GB;
 - Whisper: `tiny / base / small / medium / large-v3`, with Apple MLX and faster-whisper CTranslate2 weights managed separately and never mixed;
+- Sherpa-ONNX: lightweight, fully local speaker diarization; registration requires both a pyannote segmentation ONNX model and a 3D-Speaker embedding ONNX model;
 - pyannote Community-1: an optional local diarization model whose upstream terms must be accepted on Hugging Face before obtaining weights.
 
-The model manager can register an existing model directory, copy it into managed storage, or start a download only after an explicit user action. Merely inspecting status, starting the app, or importing media does not download a model. A missing selected weight produces a clear install/register/switch-route message. Media ingestion currently processes existing local files or lawfully obtained media; it does not provide microphone capture, live recording, or real-time streaming transcription.
+The model manager can register an existing directory, copy it into managed storage, or explicitly download entries backed by a trusted Hugging Face repository. The dual-ONNX Sherpa bundle uses import/registration. Merely inspecting status, starting the app, or importing media does not download a model. A missing selected weight produces a clear install/register/switch-route message. Media ingestion currently processes existing local files or lawfully obtained media; it does not provide microphone capture, live recording, or real-time streaming transcription.
 
 ## CLI
 
@@ -310,6 +348,9 @@ Use `AI_JINGJING_DATA_DIR` or the `--data-dir` option to select another director
 |---|---:|---|
 | Chunking, SQLite, FTS5, local semantic search | No | None |
 | Audio preflight, VAD, local ASR, diarization, playback, correction | No | None |
+| Deep correction: issue detection, local interval re-recognition, chunking, audit | No | None |
+| Deep correction: cloud-LLM semantic correction | Yes (only when started by the user) | selected transcript chunks, bounded neighboring context, terminology, and required anonymous speaker labels; never the raw media or entire knowledge base |
+| Deep correction: external web verification | Yes (separate explicit opt-in) | bounded verification queries; returned snippets, titles, and URLs are retained as untrusted evidence in the audit |
 | Local extractive answer | No | None |
 | DeepSeek/Kimi answer | Yes | question, bounded conversation context, retrieved evidence chunks, and images explicitly attached by the user |
 | DeepSeek knowledge synthesis | Yes | bounded extracted text from the current import |
@@ -326,7 +367,7 @@ pip install pytest
 pytest -q
 ```
 
-Version 2.3.0 includes 300 automated tests and 42 additional subtests (with one optional-component test skipped conditionally), covering ASR Provider routing, local model lifecycle and content verification, audio preflight/normalization/VAD, persistent crash recovery, Qwen3-ASR/Whisper fallback, scoped glossaries, diarization, Transcript V2, deferred-index quality gating, playback, human correction, evidence-layered synthesis, and indexing bridges, as well as chunking, atomic indexing, database migrations, knowledge governance, OCR, public-media safety, content-addressed archives, privacy sharing, backup restore, and desktop behavior.
+The 2.4.0 test suite covers ASR Provider routing, local model lifecycle and content verification, audio preflight/normalization/VAD, persistent crash recovery, Qwen3-ASR/Whisper fallback, scoped glossaries, diarization, Transcript V2, issue detection, continuous overlapping chunks, interval re-recognition, strict structured correction, external-evidence validation, timeline preservation, per-change audits, deferred-index quality gating, playback, human correction, evidence-layered synthesis, and indexing bridges, as well as chunking, atomic indexing, database migrations, knowledge governance, OCR, public-media safety, content-addressed archives, privacy sharing, backup restore, and desktop behavior.
 
 The repository also includes a local golden-set evaluation framework for Hit Rate@K, MRR, Citation Precision, and Citation Coverage. Replace the placeholder document and chunk IDs in the example with IDs from your own library, then run `knowledge eval`; add `--retrieval-only` to evaluate retrieval without answer generation.
 
@@ -354,7 +395,7 @@ GitHub Actions runs tests on Linux, macOS, and Windows and produces unsigned mac
 src/media_knowledge/
 ├── desktop/       PySide6 app, model manager, player, transcript editor, diagnostics, updates
 ├── ingestion/     Multimodal extraction, audio pipeline, ASR/diarization routing, OCR, gates, archive
-├── transcripts/   Transcript V2, quality evaluation, correction audit, persistence
+├── transcripts/   Transcript V2, quality evaluation, deep correction, evidence audit, persistence
 ├── chunking/      Media-aware chunking
 ├── embedding/     Local semantic and compatible embeddings
 ├── retrieval/     Vector, FTS5, fusion, reranking

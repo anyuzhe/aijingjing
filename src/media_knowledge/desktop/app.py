@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import html
 import os
 import sys
@@ -64,13 +65,18 @@ from ..transcripts import TranscriptRepository
 from .. import __version__
 from .audio_player import MediaPlayerDialog
 from .controller import DesktopController
+from .deep_correction_dialog import (
+    CorrectionChange as DialogCorrectionChange,
+    CorrectionEvidence as DialogCorrectionEvidence,
+    DeepCorrectionDialog,
+)
 from .diagnostics import run_diagnostics
 from .glossary_manager_dialog import GlossaryManagerDialog
 from .transcript_editor import TranscriptEditorDialog
 
 
 APP_STYLE = """
-QWidget { color: #294457; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; }
+QWidget { color: #294457; font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial; font-size: 14px; }
 QMainWindow, QWidget#root {
   background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
     stop:0 #e8f4fa, stop:0.48 #f5fafd, stop:1 #dcecf5);
@@ -255,6 +261,194 @@ def _markdown_html(markdown: str) -> str:
     document = QTextDocument()
     document.setMarkdown(markdown)
     return document.toHtml()
+
+
+def _deep_mapping(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _deep_sequence(value: object) -> list[object]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _deep_run_id(value: object) -> str | None:
+    payload = _deep_mapping(value)
+    snapshot = _deep_mapping(payload.get("snapshot"))
+    if snapshot:
+        payload = snapshot
+    run = _deep_mapping(payload.get("run"))
+    candidate = (
+        run.get("id")
+        or payload.get("correction_run_id")
+        or payload.get("run_id")
+        or payload.get("id")
+    )
+    clean = str(candidate or "").strip()
+    return clean or None
+
+
+def _deep_status(value: object) -> str:
+    payload = _deep_mapping(value)
+    run = _deep_mapping(payload.get("run"))
+    return str(run.get("status") or payload.get("status") or "").strip().lower()
+
+
+def _deep_transcript_text(latest: Mapping[str, object]) -> tuple[str, str]:
+    transcript = _deep_mapping(latest.get("transcript"))
+    speakers = {
+        str(item.get("id")): str(item.get("display_name") or item.get("id"))
+        for value in _deep_sequence(transcript.get("speakers"))
+        if (item := _deep_mapping(value)).get("id")
+    }
+    raw_parts: list[str] = []
+    corrected_parts: list[str] = []
+    segments = sorted(
+        (_deep_mapping(value) for value in _deep_sequence(transcript.get("segments"))),
+        key=lambda item: (
+            int(item.get("ordinal") or 0),
+            int(item.get("start_ms") or 0),
+        ),
+    )
+    for segment in segments:
+        start_ms = max(0, int(segment.get("start_ms") or 0))
+        total_seconds = start_ms // 1000
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        timestamp = (
+            f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            if hours
+            else f"{minutes:02d}:{seconds:02d}"
+        )
+        speaker_id = str(segment.get("speaker_id") or "").strip()
+        speaker = speakers.get(speaker_id, speaker_id or "未识别说话人")
+        prefix = f"[{timestamp}] {speaker}\n"
+        raw = str(segment.get("raw_text") or "").strip()
+        corrected = str(segment.get("corrected_text") or raw).strip()
+        if raw:
+            raw_parts.append(prefix + raw)
+        if corrected:
+            corrected_parts.append(prefix + corrected)
+    return "\n\n".join(raw_parts), "\n\n".join(corrected_parts)
+
+
+def _deep_snapshot_content(
+    snapshot: Mapping[str, object],
+) -> tuple[str, str, tuple[DialogCorrectionChange, ...]]:
+    paragraphs = [
+        _deep_mapping(value) for value in _deep_sequence(snapshot.get("paragraphs"))
+    ]
+    paragraphs.sort(
+        key=lambda value: (
+            int(value.get("ordinal") or 0),
+            int(value.get("start_ms") or 0),
+        )
+    )
+    paragraph_by_id = {
+        str(value.get("id")): value for value in paragraphs if value.get("id")
+    }
+    run = _deep_mapping(snapshot.get("run"))
+    result = _deep_mapping(run.get("result"))
+    result_transcript = _deep_mapping(result.get("transcript"))
+    speaker_values = result.get("speakers") or result_transcript.get("speakers")
+    speaker_names = {
+        str(item.get("id")): str(
+            item.get("display_name") or item.get("name") or item.get("id")
+        )
+        for value in _deep_sequence(speaker_values)
+        if (item := _deep_mapping(value)).get("id")
+    }
+
+    raw_parts: list[str] = []
+    corrected_parts: list[str] = []
+    for paragraph in paragraphs:
+        speaker_id = str(paragraph.get("speaker_id") or "").strip()
+        speaker = speaker_names.get(speaker_id, speaker_id or "未识别说话人")
+        prefix = f"{speaker}\n"
+        original = str(paragraph.get("original_text") or "").strip()
+        corrected = str(paragraph.get("corrected_text") or original).strip()
+        if original:
+            raw_parts.append(prefix + original)
+        if corrected:
+            corrected_parts.append(prefix + corrected)
+
+    evidence_by_change: dict[str, list[DialogCorrectionEvidence]] = {}
+    for value in _deep_sequence(snapshot.get("evidence")):
+        evidence = _deep_mapping(value)
+        change_id = str(evidence.get("change_id") or "").strip()
+        if not change_id:
+            continue
+        reference = _deep_mapping(evidence.get("source_reference"))
+        url = str(
+            evidence.get("url")
+            or reference.get("url")
+            or reference.get("uri")
+            or ""
+        ).strip()
+        if not url:
+            local_path = str(reference.get("local_path") or "").strip()
+            if local_path and Path(local_path).is_absolute():
+                url = Path(local_path).as_uri()
+        evidence_by_change.setdefault(change_id, []).append(
+            DialogCorrectionEvidence(
+                str(evidence.get("title") or evidence.get("summary") or "精校证据"),
+                url,
+            )
+        )
+
+    status_map = {"proposed": "pending", "accepted": "accepted", "rejected": "rejected"}
+    changes: list[DialogCorrectionChange] = []
+    for value in _deep_sequence(snapshot.get("changes")):
+        change = _deep_mapping(value)
+        change_id = str(change.get("id") or "").strip()
+        if not change_id:
+            continue
+        paragraph = paragraph_by_id.get(str(change.get("paragraph_id") or ""), {})
+        metadata = _deep_mapping(change.get("metadata"))
+        issue_codes = [
+            str(code).strip()
+            for code in _deep_sequence(metadata.get("issue_codes"))
+            if str(code).strip()
+        ]
+        uncertainty_reason = str(
+            metadata.get("uncertainty_reason")
+            or metadata.get("uncertain_reason")
+            or ("、".join(issue_codes) if issue_codes else "")
+        ).strip()
+        before = str(change.get("before_text") or "")
+        after = str(change.get("after_text") or "")
+        corrected_text = str(paragraph.get("corrected_text") or after)
+        uncertain = bool(metadata.get("uncertain")) or any(
+            marker in corrected_text
+            for marker in ("[待核实]", "[术语待核实]", "[听辨不清]", "[ASR解码失败]")
+        )
+        confidence_value = change.get("confidence")
+        try:
+            confidence = float(confidence_value) if confidence_value is not None else 0.0
+        except (TypeError, ValueError, OverflowError):
+            confidence = 0.0
+        speaker_id = str(paragraph.get("speaker_id") or metadata.get("speaker_id") or "").strip()
+        changes.append(
+            DialogCorrectionChange(
+                id=change_id,
+                start_ms=int(paragraph.get("start_ms") or metadata.get("start_ms") or 0),
+                end_ms=int(paragraph.get("end_ms") or metadata.get("end_ms") or 0),
+                speaker=str(
+                    metadata.get("speaker_name")
+                    or speaker_names.get(speaker_id)
+                    or speaker_id
+                    or "未识别说话人"
+                ),
+                raw_text=str(paragraph.get("original_text") or before),
+                corrected_text=corrected_text,
+                confidence=confidence,
+                uncertain=uncertain,
+                uncertainty_reason=uncertainty_reason,
+                evidence=tuple(evidence_by_change.get(change_id, ())),
+                rationale=str(change.get("reason") or "").strip(),
+                status=status_map.get(str(change.get("status") or "").lower(), "pending"),
+            )
+        )
+    return "\n\n".join(raw_parts), "\n\n".join(corrected_parts), tuple(changes)
 
 
 class WorkerSignals(QObject):
@@ -919,7 +1113,7 @@ class SettingsDialog(QDialog):
         for label, value in (
             ("自动选择", "auto"),
             ("pyannote Community-1", "pyannote"),
-            ("Sherpa-ONNX（预留）", "sherpa"),
+            ("Sherpa-ONNX（轻量纯本地）", "sherpa"),
             ("不执行说话人识别", "none"),
         ):
             self.diarization_provider.addItem(label, value)
@@ -968,6 +1162,135 @@ class SettingsDialog(QDialog):
         media_scroll.setWidget(media)
         media_scroll.setAccessibleName("多媒体解析设置")
         tabs.addTab(media_scroll, "多媒体解析")
+
+        correction = QWidget()
+        correction_form = QFormLayout(correction)
+        self.deep_correction_enabled = QCheckBox(
+            "音视频转写完成后自动生成完整语义精校稿"
+        )
+        self.deep_correction_enabled.setChecked(
+            controller.settings.deep_correction_enabled
+        )
+        self.deep_correction_enabled.setAccessibleName("自动执行深度语义精校")
+        correction_form.addRow("", self.deep_correction_enabled)
+
+        self.deep_correction_model = QComboBox()
+        self.deep_correction_model.setAccessibleName("深度精校语言模型")
+        compatible_models = []
+        try:
+            compatible_models = [
+                item
+                for item in controller.model_choices()
+                if str(item.get("id") or "").startswith("compatible::")
+            ]
+        except ValueError:
+            compatible_models = []
+        for item in compatible_models:
+            self.deep_correction_model.addItem(str(item["label"]), str(item["id"]))
+        current_correction_model = controller.settings.deep_correction_model
+        current_index = self.deep_correction_model.findData(current_correction_model)
+        if current_index < 0 and current_correction_model:
+            self.deep_correction_model.addItem(
+                f"{current_correction_model} · 当前配置", current_correction_model
+            )
+            current_index = self.deep_correction_model.count() - 1
+        if current_index >= 0:
+            self.deep_correction_model.setCurrentIndex(current_index)
+        correction_form.addRow("精校模型", self.deep_correction_model)
+
+        self.deep_correction_retranscribe = QCheckBox(
+            "对重复、截断、低置信等异常区间自动局部重识别"
+        )
+        self.deep_correction_retranscribe.setChecked(
+            controller.settings.deep_correction_retranscribe_anomalies
+        )
+        self.deep_correction_retranscribe.setAccessibleName("异常区间局部重识别")
+        correction_form.addRow("", self.deep_correction_retranscribe)
+
+        self.deep_correction_web = QCheckBox(
+            "联网核验专业术语、项目名称和公开指标，并保留来源链接"
+        )
+        self.deep_correction_web.setChecked(
+            controller.settings.deep_correction_web_verification
+        )
+        self.deep_correction_web.setAccessibleName("外部公开证据核验")
+        correction_form.addRow("", self.deep_correction_web)
+
+        self.deep_correction_cards = QCheckBox("生成可拆分的知识卡片")
+        self.deep_correction_cards.setChecked(
+            controller.settings.deep_correction_generate_knowledge_cards
+        )
+        self.deep_correction_cards.setAccessibleName("生成知识卡片")
+        correction_form.addRow("", self.deep_correction_cards)
+        self.deep_correction_mermaid = QCheckBox("生成内容逻辑 Mermaid 架构图")
+        self.deep_correction_mermaid.setChecked(
+            controller.settings.deep_correction_generate_mermaid
+        )
+        self.deep_correction_mermaid.setAccessibleName("生成 Mermaid 架构图")
+        correction_form.addRow("", self.deep_correction_mermaid)
+
+        self.deep_correction_auto_apply = QCheckBox(
+            "自动接受达到阈值且有外部证据的高置信修正"
+        )
+        self.deep_correction_auto_apply.setChecked(
+            controller.settings.deep_correction_auto_apply_high_confidence
+        )
+        self.deep_correction_auto_apply.setAccessibleName("自动接受高置信修正")
+        correction_form.addRow("", self.deep_correction_auto_apply)
+        self.deep_correction_threshold = QDoubleSpinBox()
+        self.deep_correction_threshold.setRange(0.50, 1.00)
+        self.deep_correction_threshold.setSingleStep(0.01)
+        self.deep_correction_threshold.setDecimals(2)
+        self.deep_correction_threshold.setValue(
+            controller.settings.deep_correction_confidence_threshold
+        )
+        self.deep_correction_threshold.setAccessibleName("高置信修正阈值")
+        correction_form.addRow("自动接受阈值", self.deep_correction_threshold)
+
+        window_row = QHBoxLayout()
+        self.deep_correction_chunk_seconds = QSpinBox()
+        self.deep_correction_chunk_seconds.setRange(60, 900)
+        self.deep_correction_chunk_seconds.setSuffix(" 秒/块")
+        self.deep_correction_chunk_seconds.setValue(
+            controller.settings.deep_correction_chunk_seconds
+        )
+        self.deep_correction_chunk_seconds.setAccessibleName("语义精校窗口时长")
+        self.deep_correction_overlap_seconds = QSpinBox()
+        self.deep_correction_overlap_seconds.setRange(0, 120)
+        self.deep_correction_overlap_seconds.setSuffix(" 秒重叠")
+        self.deep_correction_overlap_seconds.setValue(
+            controller.settings.deep_correction_overlap_seconds
+        )
+        self.deep_correction_overlap_seconds.setAccessibleName("语义精校窗口重叠")
+        window_row.addWidget(self.deep_correction_chunk_seconds)
+        window_row.addWidget(self.deep_correction_overlap_seconds)
+        window_row.addStretch(1)
+        correction_form.addRow("上下文窗口", window_row)
+
+        self.deep_correction_max_queries = QSpinBox()
+        self.deep_correction_max_queries.setRange(0, 50)
+        self.deep_correction_max_queries.setSuffix(" 次/资料")
+        self.deep_correction_max_queries.setValue(
+            controller.settings.deep_correction_max_external_queries
+        )
+        self.deep_correction_max_queries.setAccessibleName("外部证据查询上限")
+        correction_form.addRow("联网查询上限", self.deep_correction_max_queries)
+
+        correction_hint = QLabel(
+            "深度精校会把需要处理的转写片段发送给所选云模型；启用外部核验时还会联网搜索公开资料。"
+            "原始 ASR 始终只读保存，任何修正都会记录原文、改后文字、原因、置信度和证据。"
+            "低置信或证据不足的内容会标为待核实，不会被自动写成确定事实。"
+        )
+        correction_hint.setWordWrap(True)
+        correction_hint.setObjectName("muted")
+        correction_hint.setAccessibleName("深度精校隐私与可信度说明")
+        correction_form.addRow("", correction_hint)
+        correction_scroll = QScrollArea()
+        correction_scroll.setWidgetResizable(True)
+        correction_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        correction_scroll.setWidget(correction)
+        correction_scroll.setAccessibleName("深度精校设置")
+        tabs.addTab(correction_scroll, "深度精校")
 
         providers = QWidget()
         provider_form = QFormLayout(providers)
@@ -1030,6 +1353,33 @@ class SettingsDialog(QDialog):
             "base": "whisper-base-mlx",
             "tiny": "whisper-tiny-mlx",
         }.get(model)
+
+    def _diarization_model_status(self, provider: str):
+        """Resolve the model that belongs to the selected speaker provider.
+
+        ``auto`` follows the router's local priority: use a ready pyannote model
+        first, otherwise the ready Sherpa bundle.  Explicit Sherpa selection
+        must never persist the unrelated pyannote path.
+        """
+
+        selected = str(provider or "auto").strip().casefold()
+        if selected == "none":
+            return None
+        model_ids = {
+            "sherpa": ("sherpa-speaker-diarization-zh",),
+            "pyannote": ("pyannote-community-1",),
+            "auto": (
+                "pyannote-community-1",
+                "sherpa-speaker-diarization-zh",
+            ),
+        }.get(selected, ("pyannote-community-1",))
+        fallback = None
+        for model_id in model_ids:
+            status = self.controller.local_models.status(model_id)
+            fallback = fallback or status
+            if status.verified and status.path:
+                return status
+        return fallback
 
     @Slot()
     def _apply_transcription_profile(self) -> None:
@@ -1139,8 +1489,17 @@ class SettingsDialog(QDialog):
             for line in self.asr_context_terms.toPlainText().splitlines()
             if line.strip()
         ))[:200]
-        diarization_path = self.controller.resolve_transcription_model("pyannote-community-1")
-        diarization_status = self.controller.local_models.status("pyannote-community-1")
+        selected_diarization_provider = str(
+            self.diarization_provider.currentData() or "auto"
+        )
+        diarization_status = self._diarization_model_status(
+            selected_diarization_provider
+        )
+        diarization_path = (
+            diarization_status.path
+            if diarization_status and diarization_status.verified
+            else None
+        )
         whisper_fallback_path = self.controller.resolve_transcription_model(
             "whisper-small-mlx"
         )
@@ -1185,17 +1544,42 @@ class SettingsDialog(QDialog):
             asr_context_terms=context_terms,
             word_timestamps=self.word_timestamps.isChecked(),
             diarization_enabled=self.diarization.isChecked(),
-            diarization_provider=str(self.diarization_provider.currentData() or "auto"),
+            diarization_provider=selected_diarization_provider,
             diarization_model_path=diarization_path,
             diarization_model_sha256=(
                 diarization_status.content_sha256
-                if diarization_status.content_verified else None
+                if diarization_status and diarization_status.content_verified else None
             ),
             diarization_min_speakers=int(self.min_speakers.value()),
             diarization_max_speakers=max(
                 int(self.min_speakers.value()), int(self.max_speakers.value())
             ),
             transcript_quality_gate=self.transcript_quality_gate.isChecked(),
+            deep_correction_enabled=self.deep_correction_enabled.isChecked(),
+            deep_correction_model=str(
+                self.deep_correction_model.currentData()
+                or "compatible::deepseek::deepseek-v4-flash"
+            ),
+            deep_correction_retranscribe_anomalies=(
+                self.deep_correction_retranscribe.isChecked()
+            ),
+            deep_correction_web_verification=self.deep_correction_web.isChecked(),
+            deep_correction_generate_knowledge_cards=self.deep_correction_cards.isChecked(),
+            deep_correction_generate_mermaid=self.deep_correction_mermaid.isChecked(),
+            deep_correction_auto_apply_high_confidence=(
+                self.deep_correction_auto_apply.isChecked()
+            ),
+            deep_correction_confidence_threshold=float(
+                self.deep_correction_threshold.value()
+            ),
+            deep_correction_chunk_seconds=int(self.deep_correction_chunk_seconds.value()),
+            deep_correction_overlap_seconds=min(
+                int(self.deep_correction_overlap_seconds.value()),
+                int(self.deep_correction_chunk_seconds.value()) // 3,
+            ),
+            deep_correction_max_external_queries=int(
+                self.deep_correction_max_queries.value()
+            ),
             watched_folders_enabled=self.watched_enabled.isChecked(),
             watched_scan_minutes=min(1440, max(1, int(self.watched_minutes.text() or "10"))),
             update_manifest_url=self.update_url.text().strip() or None,
@@ -1237,6 +1621,8 @@ class MainWindow(QMainWindow):
         self._answer_operation_token: object | None = None
         self._search_operation_token: object | None = None
         self._media_players: list[MediaPlayerDialog] = []
+        self._deep_correction_dialogs: list[DeepCorrectionDialog] = []
+        self._deep_correction_contexts: dict[DeepCorrectionDialog, dict[str, object]] = {}
         self.setWindowTitle(PRODUCT_NAME)
         self.resize(1510, 920)
         self.setMinimumSize(1120, 700)
@@ -1301,6 +1687,9 @@ class MainWindow(QMainWindow):
         transcript_editor = QAction("播放与校订音视频转写…", self)
         transcript_editor.triggered.connect(self.open_transcript_editor)
         knowledge_menu.addAction(transcript_editor)
+        deep_correction = QAction("深度精校与证据复核…", self)
+        deep_correction.triggered.connect(self.open_deep_correction_dialog)
+        knowledge_menu.addAction(deep_correction)
         governance = QAction("知识体检中心…", self)
         governance.triggered.connect(self.show_knowledge_health)
         knowledge_menu.addAction(governance)
@@ -2758,6 +3147,7 @@ class MainWindow(QMainWindow):
         open_action = menu.addAction("用原应用打开")
         chunks_action = menu.addAction("查看解析知识块")
         transcript_action = menu.addAction("播放与校订转写…")
+        deep_correction_action = menu.addAction("深度精校与证据复核…")
         menu.addSeparator()
         rename_action = menu.addAction("重命名…")
         facets_action = menu.addAction("设置知识空间和标签…")
@@ -2773,6 +3163,8 @@ class MainWindow(QMainWindow):
             self.open_source_reader()
         elif chosen == transcript_action:
             self.open_transcript_editor()
+        elif chosen == deep_correction_action:
+            self.open_deep_correction_dialog()
         elif chosen == open_action:
             self.document_list.setCurrentItem(item)
             self.open_selected_source()
@@ -3558,6 +3950,511 @@ class MainWindow(QMainWindow):
             persist_review,
             lambda report: self._sync_complete({"转写校订": report}),
         )
+
+    def open_deep_correction_dialog(self) -> DeepCorrectionDialog | None:
+        document_id, _chunk_id, _timestamp_start = self._selected_source_context()
+        document = self._document_record(document_id)
+        if not document:
+            self.statusBar().showMessage("请先选择一份音频或视频资料", 5000)
+            return None
+        if str(document.get("media_type") or "").casefold() not in {"audio", "video"}:
+            self.statusBar().showMessage("当前资料不是音频或视频，不能执行深度精校", 6000)
+            return None
+        latest = self.controller.latest_transcript(str(document["id"]))
+        if not isinstance(latest, dict):
+            self.statusBar().showMessage("这份资料还没有 Transcript V2 转写，请先重新解析", 7000)
+            return None
+        run = _deep_mapping(latest.get("run"))
+        run_id = str(run.get("id") or "").strip()
+        if not run_id:
+            self.statusBar().showMessage("转写任务记录不完整，请重新解析", 7000)
+            return None
+
+        for dialog, context in tuple(self._deep_correction_contexts.items()):
+            if str(context.get("transcript_run_id") or "") != run_id:
+                continue
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            self.statusBar().showMessage("这份资料的深度精校工作台已经打开", 5000)
+            return dialog
+
+        raw_text, corrected_text = _deep_transcript_text(latest)
+        dialog = DeepCorrectionDialog(
+            source_name=str(document.get("title") or "未命名音视频"),
+            raw_text=raw_text,
+            corrected_text=corrected_text,
+            parent=self,
+        )
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        context: dict[str, object] = {
+            "transcript_run_id": run_id,
+            "document_id": str(document["id"]),
+            "source_name": str(document.get("title") or "未命名音视频"),
+            "initial_raw_text": raw_text,
+            "initial_corrected_text": corrected_text,
+            "correction_run_id": None,
+            "snapshot": None,
+            "worker": None,
+            "cancellation": None,
+            "pending_reviews": [],
+        }
+        self._deep_correction_dialogs.append(dialog)
+        self._deep_correction_contexts[dialog] = context
+        dialog.startRequested.connect(
+            lambda value=dialog: self._start_deep_correction(value, retry=False)
+        )
+        dialog.retryRequested.connect(
+            lambda value=dialog: self._start_deep_correction(value, retry=True)
+        )
+        dialog.cancelRequested.connect(lambda value=dialog: self._cancel_deep_correction(value))
+        dialog.acceptRequested.connect(
+            lambda change_id, value=dialog: self._review_deep_correction_change(
+                value, change_id, "accepted"
+            )
+        )
+        dialog.rejectRequested.connect(
+            lambda change_id, value=dialog: self._review_deep_correction_change(
+                value, change_id, "rejected"
+            )
+        )
+        dialog.exportRequested.connect(
+            lambda value=dialog: self._export_deep_correction(value)
+        )
+        dialog.finished.connect(
+            lambda _result=0, value=dialog: self._release_deep_correction_dialog(value)
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    def _release_deep_correction_dialog(self, dialog: DeepCorrectionDialog) -> None:
+        context = self._deep_correction_contexts.pop(dialog, None)
+        if context is not None:
+            cancellation = context.get("cancellation")
+            if isinstance(cancellation, CancellationToken):
+                cancellation.cancel()
+        if dialog in self._deep_correction_dialogs:
+            self._deep_correction_dialogs.remove(dialog)
+
+    def _start_deep_correction(
+        self,
+        dialog: DeepCorrectionDialog,
+        *,
+        retry: bool,
+    ) -> None:
+        context = self._deep_correction_contexts.get(dialog)
+        if context is None:
+            return
+        if context.get("worker") is not None:
+            self.statusBar().showMessage("深度精校操作已经在运行，请勿重复启动", 6000)
+            return
+        transcript_run_id = str(context.get("transcript_run_id") or "").strip()
+        correction_run_id = str(context.get("correction_run_id") or "").strip() or None
+        cancellation = CancellationToken()
+
+        def execute(signals: WorkerSignals) -> dict[str, object]:
+            def progress(*values: object, **named: object) -> None:
+                if len(values) == 1 and not named:
+                    payload: object = values[0]
+                else:
+                    payload = {
+                        "stage": values[0] if len(values) > 0 else named.get("stage"),
+                        "completed": values[1] if len(values) > 1 else named.get("completed"),
+                        "total": values[2] if len(values) > 2 else named.get("total"),
+                        "message": values[3] if len(values) > 3 else named.get("message"),
+                        **named,
+                    }
+                signals.progress.emit(payload)
+
+            try:
+                result = self.controller.deep_correct_transcript(
+                    transcript_run_id,
+                    progress=progress,
+                    cancellation=cancellation,
+                    correction_run_id=correction_run_id if retry else None,
+                )
+            except Exception as exc:
+                failed_run_id = str(
+                    getattr(exc, "correction_run_id", "") or ""
+                ).strip()
+                if failed_run_id:
+                    signals.progress.emit({
+                        "stage": "validation",
+                        "completed": 0,
+                        "total": 11,
+                        "message": "已保留失败任务，可从原检查点重试",
+                        "correction_run_id": failed_run_id,
+                    })
+                raise
+            result_dict = _deep_mapping(result)
+            resolved_run_id = _deep_run_id(result_dict) or correction_run_id
+            snapshot = _deep_mapping(result_dict.get("snapshot"))
+            if not snapshot and resolved_run_id:
+                snapshot = _deep_mapping(
+                    self.controller.deep_correction_snapshot(resolved_run_id)
+                )
+            return {
+                "result": result_dict,
+                "snapshot": snapshot or result_dict,
+                "correction_run_id": resolved_run_id,
+            }
+
+        worker = Worker(execute)
+        if not self._begin_db_operation(
+            "深度精校与证据核验",
+            worker,
+            requested="开始深度精校",
+        ):
+            dialog.mark_failed(
+                "另一个数据库任务仍在运行。",
+                "等待当前导入、同步或索引任务完成后，点击“重新尝试”。",
+            )
+            return
+        context["worker"] = worker
+        context["cancellation"] = cancellation
+        self.statusBar().showMessage(
+            "正在重新尝试深度精校…" if retry else "正在运行 11 步深度精校…"
+        )
+        worker.signals.progress.connect(
+            lambda value, target=dialog: self._deep_correction_progress(target, value)
+        )
+
+        def release() -> None:
+            active = self._deep_correction_contexts.get(dialog)
+            if active is not None and active.get("worker") is worker:
+                active["worker"] = None
+                active["cancellation"] = None
+            self._finish_db_operation(worker)
+
+        def complete(value: object) -> None:
+            release()
+            if dialog not in self._deep_correction_contexts:
+                return
+            payload = _deep_mapping(value)
+            snapshot = _deep_mapping(payload.get("snapshot"))
+            resolved_run_id = str(
+                payload.get("correction_run_id") or _deep_run_id(snapshot) or ""
+            ).strip()
+            if resolved_run_id:
+                context["correction_run_id"] = resolved_run_id
+            if not snapshot or not resolved_run_id:
+                dialog.mark_failed(
+                    "精校服务没有返回可复核的运行快照。",
+                    "确认服务已保存 correction run 后点击“重新尝试”；原始转写不会丢失。",
+                )
+                return
+            context["snapshot"] = snapshot
+            status = _deep_status(snapshot)
+            if status == "cancelled":
+                dialog.mark_cancelled("深度精校已安全取消；可从当前检查点重新尝试。")
+                return
+            if status == "failed":
+                run_value = _deep_mapping(snapshot.get("run"))
+                dialog.mark_failed(
+                    str(run_value.get("last_error") or "深度精校未通过。"),
+                    "检查失败步骤、模型和证据配置后点击“重新尝试”，系统将复用已有运行记录。",
+                )
+                return
+            self._apply_deep_correction_snapshot(dialog, snapshot)
+            dialog.mark_completed()
+            self.statusBar().showMessage("深度精校完成，请逐项复核证据与改动", 9000)
+
+        def failed(message: str) -> None:
+            cancelled = cancellation.cancelled
+            release()
+            if dialog not in self._deep_correction_contexts:
+                return
+            if cancelled or "取消" in message:
+                dialog.mark_cancelled("深度精校已安全取消；原始转写和检查点均已保留。")
+                self.statusBar().showMessage("深度精校已取消", 6000)
+                return
+            dialog.mark_failed(
+                message,
+                "根据失败步骤检查模型、网络或密钥；修复后点击“重新尝试”，已有运行 ID 会继续使用。",
+            )
+            self.statusBar().showMessage(f"深度精校失败：{message}", 10000)
+
+        worker.signals.result.connect(complete)
+        worker.signals.error.connect(failed)
+        worker.signals.finished.connect(release)
+        self.thread_pool.start(worker)
+
+    def _cancel_deep_correction(self, dialog: DeepCorrectionDialog) -> None:
+        context = self._deep_correction_contexts.get(dialog)
+        cancellation = context.get("cancellation") if context else None
+        if not isinstance(cancellation, CancellationToken):
+            dialog.mark_cancelled("当前没有仍在运行的精校任务。")
+            return
+        cancellation.cancel()
+        self.statusBar().showMessage("正在安全取消深度精校，请等待当前原子步骤结束…")
+
+    def _deep_correction_progress(
+        self,
+        dialog: DeepCorrectionDialog,
+        value: object,
+    ) -> None:
+        context = self._deep_correction_contexts.get(dialog)
+        if context is None:
+            return
+        if isinstance(value, ProgressEvent):
+            payload: dict[str, object] = {
+                "stage": value.stage,
+                "percent": value.percent,
+                "message": value.message,
+            }
+        else:
+            payload = _deep_mapping(value)
+        resolved_run_id = _deep_run_id(payload)
+        if resolved_run_id:
+            context["correction_run_id"] = resolved_run_id
+        stage = str(payload.get("stage") or "").strip().casefold()
+        message = str(payload.get("message") or "").strip()
+        stage_steps = {
+            "validation": 1,
+            "validating": 1,
+            "source_validation": 1,
+            "audio_quality": 2,
+            "anomaly": 2,
+            "rerecognition": 2,
+            "chunking": 3,
+            "chapters": 3,
+            "paragraphs": 3,
+            "diarization": 4,
+            "speakers": 4,
+            "terminology": 5,
+            "glossary": 5,
+            "terms": 5,
+            "correcting": 6,
+            "semantic_correction": 6,
+            "semantic": 6,
+            "web_verification": 7,
+            "verification": 7,
+            "evidence": 7,
+            "consistency": 8,
+            "uncertainty": 9,
+            "synthesis": 10,
+            "knowledge_cards": 10,
+            "knowledge": 10,
+            "quality_gate": 11,
+            "finalizing": 11,
+            "checkpoint": 6,
+        }
+        step_number = stage_steps.get(stage)
+        if step_number is None:
+            try:
+                completed = int(payload.get("completed") or 0)
+                total = int(payload.get("total") or 0)
+            except (TypeError, ValueError):
+                completed, total = 0, 0
+            if total > 0:
+                step_number = min(11, max(1, completed * 11 // total + 1))
+            else:
+                try:
+                    percent = max(0, min(99, int(payload.get("percent") or 0)))
+                except (TypeError, ValueError):
+                    percent = 0
+                step_number = min(11, max(1, percent * 11 // 100 + 1))
+        dialog.set_progress(step_number - 1, current_step=step_number, detail=message)
+        if message:
+            self.statusBar().showMessage(message)
+
+    def _apply_deep_correction_snapshot(
+        self,
+        dialog: DeepCorrectionDialog,
+        snapshot: Mapping[str, object],
+    ) -> None:
+        context = self._deep_correction_contexts.get(dialog, {})
+        raw_text, corrected_text, changes = _deep_snapshot_content(snapshot)
+        dialog.set_document(
+            str(context.get("source_name") or "未命名音视频"),
+            raw_text or str(context.get("initial_raw_text") or ""),
+            corrected_text or str(context.get("initial_corrected_text") or ""),
+        )
+        dialog.set_changes(changes)
+
+    def _review_deep_correction_change(
+        self,
+        dialog: DeepCorrectionDialog,
+        change_id: str,
+        decision: str,
+    ) -> None:
+        context = self._deep_correction_contexts.get(dialog)
+        if context is None:
+            return
+        previous_snapshot = _deep_mapping(context.get("snapshot"))
+        correction_run_id = str(context.get("correction_run_id") or "").strip()
+        if not correction_run_id:
+            self._apply_deep_correction_snapshot(dialog, previous_snapshot)
+            self._operation_error("无法保存复核", "缺少深度精校运行 ID，请重新执行精校。")
+            return
+        if context.get("worker") is not None:
+            queue = context.setdefault("pending_reviews", [])
+            if isinstance(queue, list):
+                pending = (str(change_id), str(decision))
+                if pending not in queue:
+                    queue.append(pending)
+            self.statusBar().showMessage("已排队保存下一项精校复核决定", 5000)
+            return
+
+        def execute(_signals: WorkerSignals) -> dict[str, object]:
+            reviewed = _deep_mapping(
+                self.controller.review_deep_correction_change(change_id, decision)
+            )
+            snapshot = _deep_mapping(
+                self.controller.deep_correction_snapshot(correction_run_id)
+            )
+            return {"reviewed": reviewed, "snapshot": snapshot}
+
+        worker = Worker(execute)
+        if not self._begin_db_operation(
+            "保存深度精校证据复核",
+            worker,
+            requested="复核另一项精校改动",
+        ):
+            self._apply_deep_correction_snapshot(dialog, previous_snapshot)
+            return
+        context["worker"] = worker
+
+        def release() -> None:
+            active = self._deep_correction_contexts.get(dialog)
+            if active is not None and active.get("worker") is worker:
+                active["worker"] = None
+            self._finish_db_operation(worker)
+
+        def complete(value: object) -> None:
+            release()
+            if dialog not in self._deep_correction_contexts:
+                return
+            payload = _deep_mapping(value)
+            reviewed = _deep_mapping(payload.get("reviewed"))
+            reviewed_change = _deep_mapping(reviewed.get("change")) or reviewed
+            status = str(reviewed_change.get("status") or decision).strip().lower()
+            ui_status = {
+                "proposed": "pending",
+                "accepted": "accepted",
+                "rejected": "rejected",
+            }.get(status, decision)
+            snapshot = _deep_mapping(payload.get("snapshot"))
+            if snapshot:
+                context["snapshot"] = snapshot
+            try:
+                dialog.set_change_status(change_id, ui_status)
+            except (KeyError, ValueError):
+                if snapshot:
+                    self._apply_deep_correction_snapshot(dialog, snapshot)
+            action = "接受" if ui_status == "accepted" else "拒绝"
+            dialog.feedback_label.setText(f"已保存对变更 {change_id} 的{action}决定和审计记录。")
+            self.statusBar().showMessage("精校变更复核已保存", 6000)
+            self._continue_deep_correction_reviews(dialog)
+
+        def failed(message: str) -> None:
+            release()
+            active = self._deep_correction_contexts.get(dialog)
+            if active is None:
+                return
+            queue = active.get("pending_reviews")
+            if isinstance(queue, list):
+                queue.clear()
+            if previous_snapshot:
+                self._apply_deep_correction_snapshot(dialog, previous_snapshot)
+            self._operation_error("精校变更复核保存失败", message)
+
+        worker.signals.result.connect(complete)
+        worker.signals.error.connect(failed)
+        worker.signals.finished.connect(release)
+        self.thread_pool.start(worker)
+
+    def _continue_deep_correction_reviews(self, dialog: DeepCorrectionDialog) -> None:
+        context = self._deep_correction_contexts.get(dialog)
+        if context is None or context.get("worker") is not None:
+            return
+        queue = context.get("pending_reviews")
+        if not isinstance(queue, list) or not queue:
+            return
+        change_id, decision = queue.pop(0)
+        QTimer.singleShot(
+            0,
+            lambda: self._review_deep_correction_change(
+                dialog, str(change_id), str(decision)
+            ),
+        )
+
+    def _export_deep_correction(self, dialog: DeepCorrectionDialog) -> None:
+        context = self._deep_correction_contexts.get(dialog)
+        if context is None:
+            return
+        correction_run_id = str(context.get("correction_run_id") or "").strip()
+        if not correction_run_id:
+            self._operation_error("无法导出精校稿", "缺少深度精校运行 ID，请先完成精校。")
+            return
+        if context.get("worker") is not None:
+            self.statusBar().showMessage("另一项精校操作仍在运行，请勿重复导出", 6000)
+            return
+        worker = Worker(
+            lambda _signals: self.controller.export_deep_correction(correction_run_id)
+        )
+        if not self._begin_db_operation(
+            "导出深度精校稿",
+            worker,
+            requested="再次导出深度精校稿",
+        ):
+            return
+        context["worker"] = worker
+        dialog.export_button.setEnabled(False)
+
+        def release() -> None:
+            active = self._deep_correction_contexts.get(dialog)
+            if active is not None and active.get("worker") is worker:
+                active["worker"] = None
+            self._finish_db_operation(worker)
+            if active is not None and dialog.state == "completed":
+                dialog.export_button.setEnabled(True)
+
+        def complete(value: object) -> None:
+            release()
+            if dialog not in self._deep_correction_contexts:
+                return
+            report = _deep_mapping(value)
+            run_value = _deep_mapping(report.get("run"))
+            path = str(
+                report.get("path")
+                or report.get("output_path")
+                or report.get("destination")
+                or run_value.get("output_path")
+                or ""
+            ).strip()
+            if not path:
+                self._operation_error("导出结果不完整", "精校服务没有返回导出文件路径。")
+                return
+            QTimer.singleShot(
+                0,
+                lambda: (
+                    dialog.feedback_label.setText(f"完整精校稿已导出：{path}")
+                    if dialog in self._deep_correction_contexts
+                    else None
+                ),
+            )
+            QMessageBox.information(
+                dialog,
+                "深度精校稿已导出",
+                f"保存位置：\n{path}\n\n原始转写、证据链接和人工复核记录均已保留。",
+            )
+            self.statusBar().showMessage(f"深度精校稿已导出：{path}", 10000)
+            self._continue_deep_correction_reviews(dialog)
+
+        def failed(message: str) -> None:
+            release()
+            if dialog not in self._deep_correction_contexts:
+                return
+            self._operation_error("深度精校稿导出失败", message)
+            self._continue_deep_correction_reviews(dialog)
+
+        worker.signals.result.connect(complete)
+        worker.signals.error.connect(failed)
+        worker.signals.finished.connect(release)
+        self.thread_pool.start(worker)
 
     def rename_selected_document(self) -> None:
         item = self.document_list.currentItem()

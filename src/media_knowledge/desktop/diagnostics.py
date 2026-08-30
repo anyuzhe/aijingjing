@@ -14,6 +14,7 @@ from ..ingestion.transcription import (
     select_transcription_plan,
 )
 from ..ingestion.asr import AsrProviderRegistry, AsrRouter, TranscriptionRequest
+from ..ingestion.diarization.sherpa_provider import find_sherpa_onnx_models
 from ..resource_scheduler import LOCAL_HEAVY_TASKS
 from .controller import DesktopController
 
@@ -93,6 +94,19 @@ def _model_directory_valid(value: str | Path | None) -> bool:
             or "weights.npz" in names
         )
     )
+
+
+def _sherpa_model_directory_valid(value: str | Path | None) -> bool:
+    if not value:
+        return False
+    path = Path(value).expanduser()
+    if not path.is_dir():
+        return False
+    try:
+        segmentation, embedding = find_sherpa_onnx_models(path)
+    except OSError:
+        return False
+    return segmentation is not None and embedding is not None
 
 
 def _embedding_local_state(controller: DesktopController) -> dict[str, object]:
@@ -237,29 +251,52 @@ def run_diagnostics(controller: DesktopController) -> dict[str, object]:
             route["legacy_plan"] = legacy.to_dict()
     except (TranscriptionUnavailable, ValueError, OSError) as exc:
         route = {"available": False, "error": str(exc)}
-    diarization_model = status_by_id.get("pyannote-community-1") or {}
+    pyannote_model = status_by_id.get("pyannote-community-1") or {}
+    sherpa_model = status_by_id.get("sherpa-speaker-diarization-zh") or {}
     diarization_provider = controller.settings.diarization_provider
+    pyannote_path = str(pyannote_model.get("path") or "") or None
+    sherpa_path = str(sherpa_model.get("path") or "") or None
+    pyannote_ready = bool(
+        _available("pyannote.audio")
+        and pyannote_model.get("verified")
+        and pyannote_path
+        and Path(pyannote_path).is_dir()
+    )
+    sherpa_ready = bool(
+        _available("sherpa_onnx")
+        and sherpa_model.get("verified")
+        and _sherpa_model_directory_valid(sherpa_path)
+    )
+    diarization_model_path: str | None = None
     if not controller.settings.diarization_enabled or diarization_provider == "none":
         diarization_ready = True
         diarization_reason = "未启用说话人识别"
-    elif diarization_provider in {"auto", "pyannote"}:
-        diarization_ready = bool(
-            _available("pyannote.audio")
-            and diarization_model.get("verified")
-            and _model_directory_valid(
-                controller.settings.diarization_model_path or diarization_model.get("path")
-            )
-        )
+    elif diarization_provider == "pyannote":
+        diarization_ready = pyannote_ready
+        diarization_model_path = pyannote_path
         diarization_reason = (
             "pyannote 本地运行组件和权重已就绪"
             if diarization_ready else "pyannote 组件或本地权重未安装"
         )
-    else:
-        diarization_ready = bool(_available("sherpa_onnx") and controller.settings.diarization_model_path)
+    elif diarization_provider == "sherpa":
+        diarization_ready = sherpa_ready
+        diarization_model_path = sherpa_path
         diarization_reason = (
-            "Sherpa-ONNX 本地组件与模型路径已配置"
-            if diarization_ready else "Sherpa-ONNX 组件或模型路径未配置"
+            "Sherpa-ONNX 本地组件与双 ONNX 模型已就绪"
+            if diarization_ready else "Sherpa-ONNX 组件或 segmentation/embedding 模型未就绪"
         )
+    else:
+        # Match the runtime router: pyannote is the first automatic choice,
+        # while an installed Sherpa bundle is a complete local fallback.
+        diarization_ready = pyannote_ready or sherpa_ready
+        if pyannote_ready:
+            diarization_model_path = pyannote_path
+            diarization_reason = "自动路线将使用 pyannote 本地模型"
+        elif sherpa_ready:
+            diarization_model_path = sherpa_path
+            diarization_reason = "自动路线将使用 Sherpa-ONNX 本地模型"
+        else:
+            diarization_reason = "未找到完整的 pyannote 或 Sherpa-ONNX 本地路线"
     embedding = _embedding_local_state(controller)
     cloud_features = []
     if controller.settings.auto_synthesize_notes:
@@ -309,7 +346,7 @@ def run_diagnostics(controller: DesktopController) -> dict[str, object]:
             "diarization": {
                 "enabled": controller.settings.diarization_enabled,
                 "provider": diarization_provider,
-                "model_path": controller.settings.diarization_model_path,
+                "model_path": diarization_model_path,
                 "ready": diarization_ready,
                 "reason": diarization_reason,
             },

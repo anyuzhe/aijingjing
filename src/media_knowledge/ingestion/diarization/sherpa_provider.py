@@ -28,7 +28,16 @@ def _module_available(module: str) -> bool:
         return False
 
 
-def _find_models(root: Path) -> tuple[Path | None, Path | None]:
+def find_sherpa_onnx_models(root: Path) -> tuple[Path | None, Path | None]:
+    """Return the segmentation and embedding models from one local bundle.
+
+    Sherpa speaker diarization is not a single ONNX file.  A runnable bundle
+    must contain both a pyannote segmentation model and a speaker embedding
+    model.  Keep this discovery shared with the desktop model manager so a
+    directory cannot be registered successfully and then fail provider
+    availability for using different filename rules.
+    """
+
     onnx_files = sorted(path for path in root.rglob("*.onnx") if path.is_file())
     segmentation = next(
         (path for path in onnx_files if "segment" in path.name.casefold() or "pyannote" in str(path).casefold()),
@@ -59,7 +68,7 @@ class SherpaOnnxProvider:
             return True, None
         if not _module_available("sherpa_onnx"):
             return False, "sherpa-onnx 运行组件未安装"
-        segmentation, embedding = _find_models(request.model_path)  # type: ignore[arg-type]
+        segmentation, embedding = find_sherpa_onnx_models(request.model_path)  # type: ignore[arg-type]
         if segmentation is None or embedding is None:
             return False, "Sherpa-ONNX 本地模型目录缺少分段或说话人嵌入 ONNX 文件"
         return True, None
@@ -127,7 +136,7 @@ class SherpaOnnxProvider:
     ) -> list[tuple[float, float, str]]:
         import sherpa_onnx  # type: ignore
 
-        segmentation, embedding = _find_models(model_path)
+        segmentation, embedding = find_sherpa_onnx_models(model_path)
         if segmentation is None or embedding is None:
             raise DiarizationUnavailable("Sherpa-ONNX 本地模型文件不完整")
         with wave.open(str(audio_path), "rb") as source:
@@ -142,9 +151,14 @@ class SherpaOnnxProvider:
             num_clusters=int(num_speakers) if num_speakers is not None else -1,
             threshold=0.5,
         )
+        # sherpa-onnx 1.13.x requires a nested pyannote model config.  Passing
+        # the path string directly as ``pyannote=...`` raises TypeError.
+        pyannote = sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
+            model=str(segmentation.resolve())
+        )
         config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
             segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
-                pyannote=str(segmentation.resolve())
+                pyannote=pyannote
             ),
             embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
                 model=str(embedding.resolve())
@@ -154,12 +168,39 @@ class SherpaOnnxProvider:
             min_duration_off=0.5,
         )
         diarizer = sherpa_onnx.OfflineSpeakerDiarization(config)
-        result = diarizer.process(floats, sample_rate=sample_rate)
+        required_sample_rate = int(diarizer.sample_rate)
+        if sample_rate != required_sample_rate:
+            raise ValueError(
+                "Sherpa-ONNX 说话人模型需要 "
+                f"{required_sample_rate} Hz 音频，实际为 {sample_rate} Hz"
+            )
+
+        def on_progress(processed_chunks: int, num_chunks: int) -> int:
+            if check_cancelled:
+                check_cancelled()
+            if progress and num_chunks > 0:
+                percent = min(100, max(0, round(processed_chunks * 100 / num_chunks)))
+                progress(f"Sherpa-ONNX 说话人分段 {percent}%")
+            return 0
+
+        # In sherpa-onnx 1.13.x the sample rate is a property of the loaded
+        # pipeline and ``process`` accepts only samples plus an optional
+        # progress/cancellation callback.  The result is not directly iterable;
+        # obtain its chronological segments explicitly.
+        result = diarizer.process(
+            floats,
+            on_progress if progress is not None or check_cancelled is not None else None,
+        )
         if check_cancelled:
             check_cancelled()
+        raw_segments = (
+            result.sort_by_start_time()
+            if hasattr(result, "sort_by_start_time")
+            else result
+        )
         segments = [
             (float(item.start), float(item.end), f"provider-speaker-{int(item.speaker)}")
-            for item in result
+            for item in raw_segments
         ]
         if progress:
             progress(f"Sherpa-ONNX 已生成 {len(segments)} 个说话人区间")

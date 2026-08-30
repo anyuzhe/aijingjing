@@ -4,7 +4,12 @@ from .llm import (
     ExtractiveGroundedProvider,
     OpenAICompatibleAnswerProvider,
 )
-from .web import DisabledWebSearchProvider, WebSearchHit, WebSearchProvider
+from .web import (
+    DisabledWebSearchProvider,
+    DuckDuckGoWebSearchProvider,
+    WebSearchHit,
+    WebSearchProvider,
+)
 
 __all__ = [
     "AnswerProvider",
@@ -12,6 +17,7 @@ __all__ = [
     "ExtractiveGroundedProvider",
     "OpenAICompatibleAnswerProvider",
     "DisabledWebSearchProvider",
+    "DuckDuckGoWebSearchProvider",
     "WebSearchHit",
     "WebSearchProvider",
 ]

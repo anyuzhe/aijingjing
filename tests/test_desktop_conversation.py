@@ -21,6 +21,14 @@ except (ImportError, RuntimeError):  # pragma: no cover - desktop extra is optio
     create_application = None
 
 
+def _fake_sherpa_bundle(path: Path) -> Path:
+    (path / "segmentation").mkdir(parents=True)
+    (path / "embedding").mkdir(parents=True)
+    (path / "segmentation" / "pyannote-segmentation.onnx").write_bytes(b"seg")
+    (path / "embedding" / "3dspeaker-embedding.onnx").write_bytes(b"emb")
+    return path
+
+
 @unittest.skipIf(create_application is None, "PySide6 desktop components are unavailable")
 class DesktopConversationTests(unittest.TestCase):
     def test_every_async_entry_uses_one_identity_safe_operation_guard(self) -> None:
@@ -216,6 +224,65 @@ class DesktopConversationTests(unittest.TestCase):
                 self.assertEqual(controller.settings.asr_model, "large-v3")
                 self.assertIsNone(controller.settings.asr_model_path)
                 self.assertIsNone(controller.settings.asr_model_sha256)
+            finally:
+                dialog.close()
+                window.close()
+                application.processEvents()
+
+    def test_sherpa_selection_persists_its_own_registered_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = DesktopController(Path(temporary) / "data", migrate_legacy=False)
+            sherpa = _fake_sherpa_bundle(Path(temporary) / "sherpa-model")
+            registered = controller.local_models.register_path(
+                "sherpa-speaker-diarization-zh", sherpa
+            )
+            application, window = create_application(controller.paths.root)
+            dialog = SettingsDialog(controller, window)
+            try:
+                labels = [
+                    dialog.diarization_provider.itemText(index)
+                    for index in range(dialog.diarization_provider.count())
+                ]
+                self.assertFalse(any("预留" in label for label in labels))
+                dialog.diarization.setChecked(True)
+                dialog.diarization_provider.setCurrentIndex(
+                    dialog.diarization_provider.findData("sherpa")
+                )
+                dialog.persist()
+                self.assertEqual(controller.settings.diarization_provider, "sherpa")
+                self.assertEqual(
+                    controller.settings.diarization_model_path,
+                    str(sherpa.resolve()),
+                )
+                self.assertEqual(
+                    controller.settings.diarization_model_sha256,
+                    registered.content_sha256,
+                )
+            finally:
+                dialog.close()
+                window.close()
+                application.processEvents()
+
+    def test_auto_diarization_uses_ready_sherpa_when_pyannote_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = DesktopController(Path(temporary) / "data", migrate_legacy=False)
+            sherpa = _fake_sherpa_bundle(Path(temporary) / "sherpa-auto")
+            controller.local_models.register_path(
+                "sherpa-speaker-diarization-zh", sherpa
+            )
+            application, window = create_application(controller.paths.root)
+            dialog = SettingsDialog(controller, window)
+            try:
+                dialog.diarization.setChecked(True)
+                dialog.diarization_provider.setCurrentIndex(
+                    dialog.diarization_provider.findData("auto")
+                )
+                dialog.persist()
+                self.assertEqual(controller.settings.diarization_provider, "auto")
+                self.assertEqual(
+                    controller.settings.diarization_model_path,
+                    str(sherpa.resolve()),
+                )
             finally:
                 dialog.close()
                 window.close()

@@ -10,7 +10,7 @@ from ..models import KnowledgeChunk, KnowledgeDocument, SearchFilters, SourceRef
 
 
 BASE_SCHEMA_VERSION = 8
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 class KnowledgeDatabase:
@@ -292,6 +292,7 @@ class KnowledgeDatabase:
             (10, self._migrate_ingestion_jobs),
             (11, self._migrate_knowledge_governance),
             (12, self._migrate_transcript_facts),
+            (13, self._migrate_deep_correction_facts),
         )
         for version, migration in migrations:
             if version in applied:
@@ -622,6 +623,132 @@ class KnowledgeDatabase:
             WHEN OLD.raw_text IS NOT NEW.raw_text
             BEGIN
                 SELECT RAISE(ABORT, 'raw transcript text is immutable');
+            END;
+            """
+        )
+
+    def _migrate_deep_correction_facts(self) -> None:
+        """Persist resumable deep-correction runs and item-level review audit."""
+
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS correction_runs (
+                id TEXT PRIMARY KEY,
+                transcript_run_id TEXT NOT NULL
+                    REFERENCES transcription_runs(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL CHECK(length(trim(provider)) > 0),
+                model TEXT NOT NULL CHECK(length(trim(model)) > 0),
+                status TEXT NOT NULL CHECK(status IN (
+                    'queued', 'running', 'completed', 'failed', 'cancelled'
+                )),
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                max_attempts INTEGER NOT NULL DEFAULT 3 CHECK(max_attempts > 0),
+                cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0, 1)),
+                config_json TEXT NOT NULL DEFAULT '{}',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                quality_summary_json TEXT NOT NULL DEFAULT '{}',
+                result_checksum TEXT,
+                output_path TEXT,
+                output_checksum TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_correction_runs_transcript
+                ON correction_runs(transcript_run_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_correction_runs_status
+                ON correction_runs(status, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS correction_paragraphs (
+                id TEXT PRIMARY KEY,
+                correction_run_id TEXT NOT NULL
+                    REFERENCES correction_runs(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                start_ms INTEGER NOT NULL CHECK(start_ms >= 0),
+                end_ms INTEGER NOT NULL CHECK(end_ms > start_ms),
+                speaker_id TEXT,
+                source_segment_ids_json TEXT NOT NULL DEFAULT '[]',
+                original_text TEXT NOT NULL,
+                corrected_text TEXT NOT NULL,
+                quality_status TEXT NOT NULL DEFAULT 'review'
+                    CHECK(quality_status IN ('pass', 'review', 'fail')),
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(correction_run_id, ordinal),
+                UNIQUE(correction_run_id, id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_correction_paragraphs_run
+                ON correction_paragraphs(correction_run_id, ordinal, start_ms);
+
+            CREATE TABLE IF NOT EXISTS correction_changes (
+                id TEXT PRIMARY KEY,
+                correction_run_id TEXT NOT NULL
+                    REFERENCES correction_runs(id) ON DELETE CASCADE,
+                paragraph_id TEXT,
+                change_type TEXT NOT NULL CHECK(length(trim(change_type)) > 0),
+                before_text TEXT NOT NULL,
+                after_text TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                confidence REAL CHECK(confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+                status TEXT NOT NULL DEFAULT 'proposed'
+                    CHECK(status IN ('proposed', 'accepted', 'rejected')),
+                source_segment_ids_json TEXT NOT NULL DEFAULT '[]',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                reviewed_by TEXT,
+                reviewed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(correction_run_id, paragraph_id)
+                    REFERENCES correction_paragraphs(correction_run_id, id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_correction_changes_run_status
+                ON correction_changes(correction_run_id, status, created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_correction_changes_paragraph
+                ON correction_changes(paragraph_id, created_at, id);
+
+            CREATE TABLE IF NOT EXISTS correction_change_events (
+                id TEXT PRIMARY KEY,
+                change_id TEXT NOT NULL REFERENCES correction_changes(id) ON DELETE CASCADE,
+                from_status TEXT,
+                to_status TEXT NOT NULL CHECK(to_status IN ('proposed', 'accepted', 'rejected')),
+                actor TEXT NOT NULL DEFAULT 'system',
+                reason TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_correction_change_events_change
+                ON correction_change_events(change_id, created_at, id);
+
+            CREATE TABLE IF NOT EXISTS correction_evidence (
+                id TEXT PRIMARY KEY,
+                correction_run_id TEXT NOT NULL
+                    REFERENCES correction_runs(id) ON DELETE CASCADE,
+                paragraph_id TEXT REFERENCES correction_paragraphs(id) ON DELETE CASCADE,
+                change_id TEXT REFERENCES correction_changes(id) ON DELETE CASCADE,
+                evidence_type TEXT NOT NULL CHECK(evidence_type IN (
+                    'external', 'source', 'knowledge', 'model'
+                )),
+                title TEXT NOT NULL DEFAULT '',
+                url TEXT,
+                summary TEXT NOT NULL DEFAULT '',
+                source_reference_json TEXT NOT NULL DEFAULT '{}',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_correction_evidence_run
+                ON correction_evidence(correction_run_id, created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_correction_evidence_change
+                ON correction_evidence(change_id, created_at, id);
+
+            CREATE TRIGGER IF NOT EXISTS correction_paragraph_source_immutable
+            BEFORE UPDATE OF original_text, source_segment_ids_json ON correction_paragraphs
+            WHEN OLD.original_text IS NOT NEW.original_text
+              OR OLD.source_segment_ids_json IS NOT NEW.source_segment_ids_json
+            BEGIN
+                SELECT RAISE(ABORT, 'correction paragraph source is immutable');
             END;
             """
         )
@@ -1347,6 +1474,8 @@ class KnowledgeDatabase:
             "knowledge_relations",
             "transcription_runs", "transcript_speakers", "transcript_segments",
             "transcript_edits", "asr_glossaries", "asr_glossary_terms",
+            "correction_runs", "correction_paragraphs", "correction_changes",
+            "correction_change_events", "correction_evidence",
         ):
             counts[table] = self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         states = {

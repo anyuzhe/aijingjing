@@ -39,7 +39,7 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         }
         self.assertIn(11, versions)
         status = self.database.status()
-        self.assertEqual(status["schema_version"], 12)
+        self.assertEqual(status["schema_version"], 13)
         for table in (
             "knowledge_items",
             "knowledge_aliases",

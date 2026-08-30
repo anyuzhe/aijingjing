@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "media-knowledge"
-version = "2.3.0"
+version = "2.4.0"
 description = "AI知识库-AI静静：本地优先的多模态知识摄取与可溯源问答桌面应用"
 requires-python = ">=3.11"
 dependencies = []
@@ -62,6 +62,7 @@ full = [
   "imageio-ffmpeg>=0.5,<1",
   "yt-dlp>=2025.1,<2027",
   "fastembed>=0.8,<1",
+  "sherpa-onnx>=1.12,<2",
   "PyInstaller>=6.10,<7",
   "pytest>=8,<10",
 ]

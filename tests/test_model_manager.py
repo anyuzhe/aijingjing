@@ -18,6 +18,17 @@ def _fake_model(path: Path) -> Path:
     return path
 
 
+def _fake_sherpa_model(path: Path, *, include_embedding: bool = True) -> Path:
+    segmentation = path / "segmentation"
+    segmentation.mkdir(parents=True)
+    (segmentation / "pyannote-segmentation.onnx").write_bytes(b"segmentation")
+    if include_embedding:
+        embedding = path / "embedding"
+        embedding.mkdir(parents=True)
+        (embedding / "3dspeaker-embedding.onnx").write_bytes(b"embedding")
+    return path
+
+
 class LocalModelManagerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -42,6 +53,35 @@ class LocalModelManagerTests(unittest.TestCase):
         self.assertEqual(len(status.content_sha256 or ""), 64)
         self.assertFalse(self.manager.remove("qwen3-asr-1.7b-mlx"))
         self.assertTrue(external.is_dir())
+
+    def test_registering_default_directory_is_managed_and_removable(self) -> None:
+        model_id = "whisper-base-mlx"
+        managed = _fake_model(self.paths.models / model_id)
+        status = self.manager.register_path(model_id, managed)
+        self.assertEqual(status.source, "managed")
+        self.assertTrue(self.manager.remove(model_id))
+        self.assertFalse(managed.exists())
+
+    def test_sherpa_registration_requires_both_onnx_model_roles(self) -> None:
+        model_id = "sherpa-speaker-diarization-zh"
+        spec = self.manager.spec(model_id)
+        self.assertEqual((spec.provider, spec.kind, spec.repo_id), (
+            "sherpa-onnx", "diarization", None,
+        ))
+        incomplete = _fake_sherpa_model(
+            Path(self.temporary.name) / "sherpa-incomplete",
+            include_embedding=False,
+        )
+        with self.assertRaisesRegex(ValueError, "segmentation.*embedding ONNX"):
+            self.manager.register_path(model_id, incomplete)
+
+        complete = _fake_sherpa_model(
+            Path(self.temporary.name) / "sherpa-complete"
+        )
+        status = self.manager.register_path(model_id, complete)
+        self.assertTrue(status.verified)
+        self.assertTrue(status.content_verified)
+        self.assertEqual(status.path, str(complete.resolve()))
 
     def test_verified_identity_lookup_never_rehashes_or_downloads(self) -> None:
         external = _fake_model(Path(self.temporary.name) / "identity-model")

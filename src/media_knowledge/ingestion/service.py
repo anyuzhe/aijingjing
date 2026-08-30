@@ -63,6 +63,8 @@ class IngestionResult:
     warnings: list[str] = field(default_factory=list)
     quality_report: dict[str, object] = field(default_factory=dict)
     transcript_run_id: str | None = None
+    deep_correction_run_id: str | None = None
+    deep_correction_path: str | None = None
     error: str | None = None
     duration_ms: float = 0.0
 
@@ -256,6 +258,15 @@ class IngestionService:
                     )
                     effective_settings = replace(
                         self.settings,
+                        # Deep correction needs speaker turns as first-class
+                        # evidence.  Enabling the pipeline therefore attempts
+                        # the already-installed local diarizer during ingestion;
+                        # unavailable models still fall back to explicit unknown
+                        # speakers rather than invented identities.
+                        diarization_enabled=(
+                            self.settings.diarization_enabled
+                            or self.settings.deep_correction_enabled
+                        ),
                         asr_context_terms=list(dict.fromkeys([
                             *self.settings.asr_context_terms,
                             *glossary_terms,

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
@@ -363,6 +365,42 @@ class TranscriptRepository:
                 "DELETE FROM transcription_runs WHERE id=?", (_clean(run_id),)
             )
         return cursor.rowcount > 0
+
+    def write_latest_v2(
+        self,
+        run_id: str,
+        path: str | Path,
+        *,
+        overwrite: bool = False,
+        expected_existing_checksum: str | None = None,
+        allowed_root: str | Path | None = None,
+    ) -> Path:
+        """Atomically regenerate V2 JSON from current editable database facts.
+
+        Overwrite requires an explicit flag. Callers may additionally provide the
+        previous file checksum for compare-and-swap protection against stale UI
+        state or another process exporting concurrently.
+        """
+
+        from .exporter import atomic_write_bytes, safe_output_path
+
+        transcript = self.get_transcript(run_id)
+        if transcript is None:
+            raise KeyError(f"转写任务不存在：{run_id}")
+        target = safe_output_path(path, suffixes=(".json",), allowed_root=allowed_root)
+        if target.exists():
+            if not overwrite:
+                raise FileExistsError(f"转写文件已存在：{target}")
+            if target.is_symlink():
+                raise ValueError("拒绝覆盖符号链接")
+            if expected_existing_checksum is not None:
+                actual = hashlib.sha256(target.read_bytes()).hexdigest()
+                if actual != _clean(expected_existing_checksum):
+                    raise RuntimeError("现有 V2 文件已发生变化，拒绝覆盖")
+        elif expected_existing_checksum is not None:
+            raise RuntimeError("预期覆盖的 V2 文件不存在")
+        atomic_write_bytes(target, transcript.to_json().encode("utf-8"), overwrite=overwrite)
+        return target
 
     def get_segment(self, segment_id: str) -> TranscriptSegment | None:
         row = self.connection.execute(

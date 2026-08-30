@@ -225,6 +225,17 @@ class DesktopSettings:
     diarization_min_speakers: int = 1
     diarization_max_speakers: int = 8
     transcript_quality_gate: bool = True
+    deep_correction_enabled: bool = False
+    deep_correction_model: str = "compatible::deepseek::deepseek-v4-flash"
+    deep_correction_retranscribe_anomalies: bool = True
+    deep_correction_web_verification: bool = False
+    deep_correction_generate_knowledge_cards: bool = True
+    deep_correction_generate_mermaid: bool = True
+    deep_correction_auto_apply_high_confidence: bool = False
+    deep_correction_confidence_threshold: float = 0.92
+    deep_correction_chunk_seconds: int = 300
+    deep_correction_overlap_seconds: int = 30
+    deep_correction_max_external_queries: int = 12
     model_idle_timeout_seconds: int = 300
     embedding_provider: str = "hash"
     embedding_model: str = "hash-384-v1"
@@ -272,6 +283,10 @@ class DesktopSettings:
         settings.diarization_provider = str(
             settings.diarization_provider or "auto"
         ).strip().casefold()
+        settings.deep_correction_model = str(
+            settings.deep_correction_model
+            or "compatible::deepseek::deepseek-v4-flash"
+        ).strip()
         if settings.ocr_engine not in {"auto", "rapidocr", "paddleocr"}:
             settings.ocr_engine = "auto"
         if settings.transcription_engine not in {"auto", "mlx", "cuda", "cpu", "faster-whisper"}:
@@ -324,6 +339,35 @@ class DesktopSettings:
         except (TypeError, ValueError, OverflowError):
             settings.diarization_min_speakers = 1
             settings.diarization_max_speakers = 8
+        try:
+            settings.deep_correction_confidence_threshold = min(
+                1.0,
+                max(0.5, float(settings.deep_correction_confidence_threshold)),
+            )
+            settings.deep_correction_chunk_seconds = min(
+                900, max(60, int(settings.deep_correction_chunk_seconds))
+            )
+            settings.deep_correction_overlap_seconds = min(
+                120,
+                max(0, int(settings.deep_correction_overlap_seconds)),
+            )
+            settings.deep_correction_overlap_seconds = min(
+                settings.deep_correction_overlap_seconds,
+                max(0, settings.deep_correction_chunk_seconds // 3),
+            )
+            settings.deep_correction_max_external_queries = min(
+                50, max(0, int(settings.deep_correction_max_external_queries))
+            )
+        except (TypeError, ValueError, OverflowError):
+            defaults = cls()
+            settings.deep_correction_confidence_threshold = (
+                defaults.deep_correction_confidence_threshold
+            )
+            settings.deep_correction_chunk_seconds = defaults.deep_correction_chunk_seconds
+            settings.deep_correction_overlap_seconds = defaults.deep_correction_overlap_seconds
+            settings.deep_correction_max_external_queries = (
+                defaults.deep_correction_max_external_queries
+            )
         try:
             settings.model_idle_timeout_seconds = max(
                 30, min(3600, int(settings.model_idle_timeout_seconds))

@@ -1,6 +1,6 @@
 {
-  "version": "2.3.0",
-  "download_url": "https://downloads.example.com/AI-Jingjing-2.3.0-macOS-arm64-MLX.dmg",
+  "version": "2.4.0",
+  "download_url": "https://downloads.example.com/AI-Jingjing-2.4.0-macOS-arm64-MLX.dmg",
   "sha256": "6b27e871292052e5bf10e87cd879fd2655c8c0542d878fa222a9ab18a5357f09",
-  "notes": "AI静静 2.3：可切换 Qwen3-ASR/Whisper、本地模型管理、音频预检与 VAD、Transcript V2、说话人识别、转写质量门禁、播放器和可审计人工校订。"
+  "notes": "AI静静 2.4：Large-v3/Qwen3-ASR、Sherpa-ONNX 说话人分离、异常区间重识别、跨片段语义精校、外部证据契约、不确定标注、差异审计与完整说话人 Markdown。"
 }

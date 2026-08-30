@@ -35,7 +35,8 @@ from ..storage import (
     KnowledgeGovernanceRepository,
     SQLiteVectorStore,
 )
-from ..transcripts import TranscriptRepository
+from ..transcripts import DeepCorrectionRepository, TranscriptRepository
+from ..transcripts.workflow import DeepCorrectionWorkflow
 from ..sync import ObsidianMarkdownSync, scan_folder
 from ..indexing import IndexingService
 from .backup import create_backup as create_product_backup
@@ -1022,6 +1023,59 @@ class DesktopController:
             result = service.ingest(
                 values, progress=tracked_progress, cancellation=cancellation
             )
+            if self.settings.deep_correction_enabled:
+                for item_result in result.results:
+                    if (
+                        not item_result.transcript_run_id
+                        or item_result.status in {"failed", "cancelled"}
+                    ):
+                        continue
+                    if cancellation is not None and cancellation.cancelled:
+                        item_result.warnings.append(
+                            "用户已取消后续深度精校；首轮转写和入库结果已安全保留"
+                        )
+                        continue
+
+                    def correction_progress(
+                        *values: object,
+                        source_item: str = item_result.item,
+                    ) -> None:
+                        if len(values) == 1 and isinstance(values[0], dict):
+                            payload = values[0]
+                            stage = str(payload.get("stage") or "validation")
+                            completed = int(payload.get("completed") or 0)
+                            total = int(payload.get("total") or 11)
+                            message = str(payload.get("message") or "")
+                        else:
+                            stage = str(values[0] if len(values) > 0 else "semantic")
+                            completed = int(values[1] if len(values) > 1 else 0)
+                            total = int(values[2] if len(values) > 2 else 11)
+                            message = str(values[3] if len(values) > 3 else "")
+                        tracked_progress(ProgressEvent(
+                            source_item,
+                            f"deep_correction:{stage}",
+                            100,
+                            f"深度精校 {completed}/{total}：{message}",
+                        ))
+
+                    try:
+                        corrected = self.deep_correct_transcript(
+                            item_result.transcript_run_id,
+                            progress=correction_progress,
+                            cancellation=cancellation,
+                        )
+                    except Exception as correction_error:
+                        item_result.warnings.append(
+                            "资料已正常入库，但自动深度精校未完成："
+                            + str(correction_error)[:240]
+                        )
+                    else:
+                        item_result.deep_correction_run_id = str(
+                            corrected.get("correction_run_id") or ""
+                        ) or None
+                        item_result.deep_correction_path = str(
+                            corrected.get("output_path") or ""
+                        ) or None
         except Exception as exc:
             with KnowledgeDatabase(self.paths.database) as database:
                 IngestionJobRepository(database).fail_job(active_job_id, str(exc))
@@ -1304,6 +1358,149 @@ class DesktopController:
                 "document_title": str(document["title"]),
                 "document_enabled": bool(document["enabled"]),
             }
+
+    def _deep_correction_workflow(self) -> DeepCorrectionWorkflow:
+        return DeepCorrectionWorkflow(self.paths, self.config(), self.settings)
+
+    def deep_correct_transcript(
+        self,
+        run_id: str,
+        *,
+        progress: Callable[..., None] | None = None,
+        cancellation: CancellationToken | None = None,
+        correction_run_id: str | None = None,
+    ) -> dict[str, object]:
+        """Run the first-party deep-correction service without Codex CLI."""
+
+        def report(stage: str, completed: int, total: int, message: str) -> None:
+            if progress:
+                progress(stage, completed, total, message)
+
+        def created(value: str) -> None:
+            if progress:
+                progress({
+                    "stage": "validation",
+                    "completed": 0,
+                    "total": 11,
+                    "message": "深度精校任务已建立，原始转写已锁定为不可变证据",
+                    "correction_run_id": value,
+                })
+
+        result = self._deep_correction_workflow().run(
+            run_id,
+            progress=report,
+            cancellation=cancellation,
+            correction_run_id=correction_run_id,
+            run_created=created,
+        )
+        resolved = str(result.get("correction_run_id") or "").strip()
+        if not resolved:
+            raise RuntimeError("深度精校完成但没有返回运行 ID")
+        auto_change_ids = [
+            str(item)
+            for item in (result.get("auto_accepted_change_ids") or [])
+            if str(item).strip()
+        ]
+        index_report: dict[str, object] | None = None
+        if auto_change_ids:
+            with KnowledgeDatabase(self.paths.database) as database:
+                correction_repository = DeepCorrectionRepository(database)
+                changes = [
+                    correction_repository.get_change(change_id)
+                    for change_id in auto_change_ids
+                ]
+                correction = correction_repository.get_run(resolved)
+                transcript_run = (
+                    TranscriptRepository(database).get_run(correction.transcript_run_id)
+                    if correction else None
+                )
+                document = (
+                    database.get_document(transcript_run.document_id)
+                    if transcript_run and transcript_run.document_id else None
+                )
+                affected_segment_ids = list(dict.fromkeys(
+                    segment_id
+                    for change in changes if change is not None
+                    for segment_id in change.source_segment_ids
+                ))
+                should_refresh = bool(document is not None and document["enabled"])
+            if should_refresh:
+                try:
+                    index_report = self.refresh_transcript_index(
+                        run_id,
+                        affected_segment_ids=affected_segment_ids,
+                    )
+                except Exception as exc:
+                    index_report = {
+                        "status": "failed",
+                        "error": str(exc)[:500],
+                        "retry": "rebuild_search_index",
+                    }
+        return {
+            "correction_run_id": resolved,
+            "snapshot": self.deep_correction_snapshot(resolved),
+            "output_path": result.get("output_path"),
+            "output_checksum": result.get("output_checksum"),
+            "warnings": result.get("warnings") or [],
+            "auto_accepted_change_ids": auto_change_ids,
+            "index": index_report,
+        }
+
+    def deep_correction_snapshot(self, correction_run_id: str) -> dict[str, object]:
+        """Return the durable, mapping-only audit snapshot consumed by the UI."""
+
+        with KnowledgeDatabase(self.paths.database) as database:
+            repository = DeepCorrectionRepository(database)
+            if repository.get_run(correction_run_id) is None:
+                raise ValueError("深度精校任务不存在")
+            return repository.snapshot(correction_run_id)
+
+    def review_deep_correction_change(
+        self,
+        change_id: str,
+        decision: str,
+    ) -> dict[str, object]:
+        """Persist one human decision; accepted text is atomically applied."""
+
+        reviewed = self._deep_correction_workflow().review_change(
+            change_id, decision=decision
+        )
+        change = reviewed.get("change")
+        change_value = dict(change) if isinstance(change, dict) else {}
+        correction_run_id = str(change_value.get("correction_run_id") or "")
+        index_report: dict[str, object] | None = None
+        if str(decision).strip().casefold() == "accepted" and correction_run_id:
+            with KnowledgeDatabase(self.paths.database) as database:
+                correction = DeepCorrectionRepository(database).get_run(correction_run_id)
+                transcript_run = (
+                    TranscriptRepository(database).get_run(correction.transcript_run_id)
+                    if correction else None
+                )
+                document = (
+                    database.get_document(transcript_run.document_id)
+                    if transcript_run and transcript_run.document_id else None
+                )
+                should_refresh = bool(document is not None and document["enabled"])
+                transcript_run_id = transcript_run.id if transcript_run else None
+            if should_refresh and transcript_run_id:
+                try:
+                    index_report = self.refresh_transcript_index(
+                        transcript_run_id,
+                        affected_segment_ids=change_value.get("source_segment_ids") or (),
+                    )
+                except Exception as exc:
+                    # The human decision and corrected V2 are already durable.
+                    # Report an independently retryable index failure instead of
+                    # pretending the atomic review itself was rolled back.
+                    index_report = {
+                        "status": "failed",
+                        "error": str(exc)[:500],
+                        "retry": "rebuild_search_index",
+                    }
+        return {"change": change_value, "index": index_report}
+
+    def export_deep_correction(self, correction_run_id: str) -> dict[str, object]:
+        return self._deep_correction_workflow().export(correction_run_id)
 
     def refresh_transcript_index(
         self,

@@ -216,7 +216,13 @@ class ModelManagerDialog(QDialog):
         model_id = self.selected_model_id()
         busy = self._task is not None
         status = self.manager.status(model_id) if model_id else None
-        self.download_button.setEnabled(bool(model_id and not busy and status and not status.installed))
+        self.download_button.setEnabled(bool(
+            model_id
+            and not busy
+            and status
+            and not status.installed
+            and status.spec.repo_id
+        ))
         self.import_button.setEnabled(bool(model_id and not busy and status and not status.installed))
         self.register_button.setEnabled(bool(model_id and not busy))
         self.remove_button.setEnabled(bool(model_id and not busy and status and status.installed))

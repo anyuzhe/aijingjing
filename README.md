@@ -7,8 +7,8 @@
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB" alt="Python 3.11+">
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/Test-300-2F855A" alt="300 tests">
-    <img src="https://img.shields.io/badge/Version-2.3.0-4C8FBF" alt="Version 2.3.0">
+    <img src="https://img.shields.io/badge/Test-pytest-2F855A" alt="pytest">
+    <img src="https://img.shields.io/badge/Version-2.4.0-4C8FBF" alt="Version 2.4.0">
   </p>
 </div>
 
@@ -72,7 +72,38 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 
 音视频转写为“需要复核”或“失败”时，只保存原始资料与 Transcript V2 事实，不建立 FTS 或向量索引；人工校订并批准后才会原子补建索引。AI 知识提炼是独立派生层，强制区分已确认事实、待验证推测、争议、决策和行动项，并拒绝原始资料中不存在的页码或时间戳。
 
-### 3. 正式知识治理
+### 3. 完整深度语义精校
+
+深度精校不是把整篇转写交给模型“重写”，而是在不可变原稿之上建立一条可恢复、可审计的派生链路：
+
+```text
+Transcript V2 原始识别（只读）
+        ↓
+异常扫描：重复循环 / 低置信 / 静音幻觉 / 截断 / 术语 / 数字单位
+        ↓
+连续且带重叠上下文的分块
+        ↓
+可选局部重识别：仅重跑异常时间区间，可切换 Large-v3 或 Qwen3-ASR
+        ↓
+结构化 LLM 跨片段精校 + 术语与实体一致性
+        ↓
+可选外部证据核验（必须由用户显式开启联网）
+        ↓
+逐条修改建议、证据、理由、置信度与接受/拒绝审计
+        ↓
+说话人版 Markdown / 章节 / 知识卡片 / Mermaid 知识结构图
+```
+
+- 转写路线可选择 `Whisper large-v3`、`Qwen3-ASR 1.7B` 或 `Qwen3-ASR 0.6B`。首轮识别和异常区间局部重识别可以使用不同路线，用更强模型复核疑难片段，而不是浪费算力重跑整段媒体。
+- 可选说话人分离保留匿名 `S1/S2/...`、时间范围和重叠讲话；人工命名、合并或重新分配不会改写原始 ASR 事实。说话人身份是人工标注，不会仅凭声纹猜测真实姓名。
+- LLM 必须返回严格结构化 JSON，并保持每个 `segment_id`、开始/结束时间和说话人映射。系统拒绝缺片段、越界定位、伪造时间戳、无法对应原文的引用和静默删除内容。
+- 外部核验默认关闭。开启后只把有界查询发送给检索服务；网页文本始终作为不可信数据，模型只能引用注入结果中的证据 ID、原 URL 和逐字存在的摘录，不能执行网页中的指令。证据不足时保留原意并标记 `［待核实］`、`［术语待核实］`、`［听辨不清］` 或 `［ASR解码失败］`，不会为了流畅而补写事实。
+- 每项建议保存 `before / after / reason / confidence / evidence`，可以逐条接受或拒绝。原始 `raw_text` 永不覆盖；获批内容写入独立校订层，检查点允许暂停、取消和恢复。
+- 导出的 Markdown 可同时包含完整时间轴、说话人、章节、术语待核实表、全量原稿/精校稿差异审计、知识卡片和 Mermaid 图；知识提炼仍然是原始转写之外的派生结果。
+
+模型权重不随安装包分发。Large-v3、Qwen3-ASR 和说话人模型需由用户在模型管理器中显式下载或登记已有本地目录；没有相应权重时不会静默联网或假装完成局部重识别。
+
+### 4. 正式知识治理
 
 - 原始资料自动映射为 `source`，知识工坊产物自动映射为 `output`。
 - 支持来源、主题、实体、分析、决策、成果 6 类正式知识。
@@ -83,7 +114,7 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 - 知识体检会发现孤立知识、缺失来源、空正文、过期内容、标签不统一、别名冲突和高价值来源未编译，并给出恢复建议。
 - 删除正式知识前会先原子保存 tombstone、Markdown、别名、标签和知识关系；可在“知识 → 回收站”恢复原 ID 与仍有效的关系，原始资料不会被删除。
 
-### 4. 本地语义检索
+### 5. 本地语义检索
 
 - SQLite FTS5 全文检索；
 - 本地中英文语义 Embedding；
@@ -95,7 +126,7 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 
 检索过程不调用大模型。首次使用会下载约 240 MB 的多语言 ONNX 模型，之后可以离线运行。
 
-### 5. 连续对话与可信引用
+### 6. 连续对话与可信引用
 
 - 支持同一会话内连续多轮提问；
 - 对话自动持久化，可搜索、重新打开、重命名、删除和导出 Markdown；
@@ -116,7 +147,7 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 
 回答模型可以选择 DeepSeek、Kimi 或完全离线的本地证据模型。配置 DeepSeek 后默认使用支持文字与图片理解的实验模型 `deepseek-v4-flash-vision-exp`；检索本身不调用大模型，因此日常搜索成本很低。
 
-### 6. 原文阅读与资料管理
+### 7. 原文阅读与资料管理
 
 - 在应用内阅读 PDF 页面、图片、解析文本与音视频时间轴；
 - 从回答引用或转写片段直接打开内置播放器并跳转到精确时间点，播放时同步高亮当前片段，也可调整速度或用系统应用打开原文件；
@@ -128,7 +159,7 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 - 检查内容指纹相同的重复资料；
 - 原始归档默认保留，移除索引不会销毁原文件。
 
-### 7. 自动同步与知识工坊
+### 8. 自动同步与知识工坊
 
 - 监听一个或多个文件夹并增量入库；
 - 每批导入及每个文件的阶段、进度、错误和结果都会持久化；
@@ -138,7 +169,7 @@ AI静静把 PDF、PPT、Word、图片、音频、视频、网页和 Markdown 统
 - 可选从 Obsidian 增量同步，或把 AI静静笔记导出至 Obsidian；
 - 基于选定资料生成综合报告、多资料比较、时间线、测验、复习闪卡和思维导图。
 
-### 8. 本地数据安全
+### 9. 本地数据安全
 
 - 知识、索引、对话、答案和引用保存在本机 SQLite；
 - API Key 优先保存在 macOS Keychain 或系统凭据存储；
@@ -178,6 +209,10 @@ PySide6 桌面界面
         │   ├── OCR / FFmpeg / 音频预检与标准化 / VAD
         │   ├── ASR Router (Qwen3-ASR / MLX Whisper / faster-whisper)
         │   ├── 可选说话人识别 / Transcript V2 / 质量门禁
+        │   ├── DeepCorrectionService
+        │   │   ├── 异常检测 / 重叠分块 / 异常区间局部重识别
+        │   │   ├── 结构化精校 / 术语实体一致性 / 保守不确定标注
+        │   │   └── 证据审计 / 逐条接受拒绝 / Markdown 知识产物
         │   ├── 入库真实性与完整性质检
         │   └── Source Package 归档
         │
@@ -236,7 +271,9 @@ pip install -e '.[speaker]'
 pip install -e '.[layout-ocr]'
 ```
 
-`.[full]` 已包含公开平台连接器与 faster-whisper 运行时；源码开发时可用 `.[apple-media]` 增加 Qwen3-ASR/MLX Whisper 运行时，用 `.[speaker]` 增加可选说话人识别后端。macOS Apple Silicon 正式包可包含 MLX 推理运行时，但所有 ASR 与说话人模型权重都不随安装包分发。PaddleOCR 仍作为专业版面组件按需安装；`layout-ocr` 已包含 PP-StructureV3 的文档解析依赖，但 PaddlePaddle 需要按 CPU/CUDA 与操作系统选择官方安装包。缺失组件会在“帮助 → 系统诊断”中明确显示，不会静默伪装为成功。
+`.[full]` 已包含公开平台连接器、faster-whisper 和轻量 Sherpa-ONNX 说话人推理运行时；源码开发时可用 `.[apple-media]` 增加 Qwen3-ASR/MLX Whisper，用 `.[speaker]` 再增加 pyannote 后端。macOS Apple Silicon 正式包可包含 MLX 推理运行时，但所有 ASR 与说话人模型权重都不随安装包分发。PaddleOCR 仍作为专业版面组件按需安装；`layout-ocr` 已包含 PP-StructureV3 的文档解析依赖，但 PaddlePaddle 需要按 CPU/CUDA 与操作系统选择官方安装包。缺失组件会在“帮助 → 系统诊断”中明确显示，不会静默伪装为成功。
+
+`scripts/build_desktop.sh` 会检测构建机架构：macOS arm64 自动安装 `full,apple-media`，使正式包带有 MLX/Qwen 运行时；Intel macOS、Windows 与 Linux 继续使用跨平台的 `full` 依赖。脚本不会下载任何模型权重。
 
 ### 配置回答模型
 
@@ -251,9 +288,10 @@ pip install -e '.[layout-ocr]'
 - `Qwen3-ASR 1.7B`：中文会议、课程与专业内容的高精度档，约 2.2 GB；
 - `Qwen3-ASR 0.6B`：速度与占用优先的快速预览档，约 0.9 GB；
 - Whisper：提供 `tiny / base / small / medium / large-v3` 多档，Apple MLX 与 faster-whisper CTranslate2 权重分别管理，绝不会混用；
+- Sherpa-ONNX：轻量纯本地说话人分离；需同时登记 pyannote segmentation 与 3D-Speaker embedding 两个 ONNX 权重；
 - pyannote Community-1：可选本地说话人识别模型，首次取得权重前需在 Hugging Face 接受上游条款。
 
-模型管理器支持登记已有模型目录、复制导入和由用户主动发起下载。仅查看状态、启动应用或导入音视频都不会联网下载模型；缺少所选权重时会明确提示安装、登记目录或切换路线。当前音视频入口只处理已有本地文件或已合法取得的媒体，不提供麦克风采集、实时录音或实时流式转写。
+模型管理器支持登记已有模型目录、复制导入，并且对具有受信 Hugging Face 仓库的条目支持用户主动下载；Sherpa 双 ONNX 组合使用导入/登记。仅查看状态、启动应用或导入音视频都不会联网下载模型；缺少所选权重时会明确提示安装、登记目录或切换路线。当前音视频入口只处理已有本地文件或已合法取得的媒体，不提供麦克风采集、实时录音或实时流式转写。
 
 ## 命令行
 
@@ -310,6 +348,9 @@ AI-Jingjing/
 |---|---:|---|
 | 分块、SQLite、全文检索、本地语义检索 | 否 | 无 |
 | 音频预检、VAD、本地 ASR、说话人识别、播放与校订 | 否 | 无 |
+| 深度精校：异常检测、局部本地重识别、分块与审计 | 否 | 无 |
+| 深度精校：云 LLM 语义校正 | 是（用户主动运行） | 选中转写片段、相邻上下文、术语与必要的说话人标签；不发送原始音视频或整个知识库 |
+| 深度精校：外部网页核验 | 是（另行显式开启） | 有界核验查询；返回摘录、标题与 URL 作为不可信证据保存到审计记录 |
 | 本地证据回答 | 否 | 无 |
 | DeepSeek/Kimi 回答 | 是 | 问题、有限对话上下文、召回的证据块，以及用户主动附加的图片 |
 | DeepSeek 知识提炼 | 是 | 当前导入资料的有界提取文本 |
@@ -326,7 +367,7 @@ pip install pytest
 pytest -q
 ```
 
-当前 2.3.0 版本包含 300 项自动化测试、42 项额外子测试（另有 1 项按可选组件条件跳过），覆盖 ASR Provider 路由、本地模型生命周期与内容校验、音频预检/标准化/VAD、持久检查点与崩溃恢复、Qwen3-ASR/Whisper 降级、三层专业词库、说话人识别、Transcript V2、延迟索引质量门禁、播放器、人工校订、证据分层知识提炼与索引桥接，以及分块、原子索引、数据库迁移、知识治理、OCR、公开视频安全、内容寻址归档、隐私分享、备份恢复和桌面产品行为。
+2.4.0 的自动化测试覆盖 ASR Provider 路由、本地模型生命周期与内容校验、音频预检/标准化/VAD、持久检查点与崩溃恢复、Qwen3-ASR/Whisper 降级、三层专业词库、说话人识别、Transcript V2、异常检测、连续重叠分块、局部重识别、严格结构化精校、外部证据校验、时间轴保真、逐条校订审计、延迟索引质量门禁、播放器、人工校订、证据分层知识提炼与索引桥接，以及分块、原子索引、数据库迁移、知识治理、OCR、公开视频安全、内容寻址归档、隐私分享、备份恢复和桌面产品行为。
 
 仓库还提供本地黄金集评测框架，可计算 Hit Rate@K、MRR、Citation Precision 和 Citation Coverage。先把示例中的文档 ID、知识块 ID 换成自己的入库记录，再运行 `knowledge eval`；加 `--retrieval-only` 可只评估检索。
 
@@ -354,7 +395,7 @@ GitHub Actions 会在 Linux、macOS 和 Windows 上运行测试，并生成 macO
 src/media_knowledge/
 ├── desktop/       PySide6 应用、模型管理、播放器、转写校订、诊断与更新
 ├── ingestion/     多模态提取、音频管线、ASR/说话人路由、OCR、质检与归档
-├── transcripts/   Transcript V2、质量评估、校订审计与持久化
+├── transcripts/   Transcript V2、质量评估、深度精校、外部证据审计与持久化
 ├── chunking/      媒体感知分块
 ├── embedding/     本地语义与兼容 Embedding
 ├── retrieval/     向量、FTS5、融合与重排

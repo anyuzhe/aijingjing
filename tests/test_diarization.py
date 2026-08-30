@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import tempfile
+import sys
+import wave
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from media_knowledge.ingestion.diarization import (
@@ -291,6 +294,112 @@ class LocalProviderTests(unittest.TestCase):
         available, reason = SherpaOnnxProvider().availability(request)
         self.assertFalse(available)
         self.assertIn("本地模型", reason or "")
+
+    def test_sherpa_1136_adapter_uses_nested_config_and_result_sorting(self) -> None:
+        captured: dict[str, object] = {}
+
+        class PyannoteConfig:
+            def __init__(self, *, model: str) -> None:
+                self.model = model
+
+        class SegmentationConfig:
+            def __init__(self, *, pyannote: PyannoteConfig) -> None:
+                if not isinstance(pyannote, PyannoteConfig):
+                    raise TypeError("pyannote must be a nested model config")
+                self.pyannote = pyannote
+
+        class EmbeddingConfig:
+            def __init__(self, *, model: str) -> None:
+                self.model = model
+
+        class ClusteringConfig:
+            def __init__(self, *, num_clusters: int, threshold: float) -> None:
+                self.num_clusters = num_clusters
+                self.threshold = threshold
+
+        class DiarizationConfig:
+            def __init__(
+                self, *, segmentation, embedding, clustering,
+                min_duration_on: float, min_duration_off: float,
+            ) -> None:
+                captured["segmentation"] = segmentation
+                captured["embedding"] = embedding
+                captured["clustering"] = clustering
+                captured["durations"] = (min_duration_on, min_duration_off)
+
+        class Result:
+            def sort_by_start_time(self):
+                return [
+                    SimpleNamespace(start=0.0, end=0.5, speaker=1),
+                    SimpleNamespace(start=0.5, end=1.0, speaker=0),
+                ]
+
+        class Diarizer:
+            sample_rate = 16_000
+
+            def __init__(self, _config) -> None:
+                pass
+
+            def process(self, samples, callback=None):
+                captured["sample_count"] = len(samples)
+                captured["callback"] = callback
+                if callback:
+                    self.assert_callback(callback)
+                return Result()
+
+            @staticmethod
+            def assert_callback(callback) -> None:
+                if callback(1, 2) != 0:
+                    raise AssertionError("callback must return zero")
+
+        fake_module = SimpleNamespace(
+            OfflineSpeakerSegmentationPyannoteModelConfig=PyannoteConfig,
+            OfflineSpeakerSegmentationModelConfig=SegmentationConfig,
+            SpeakerEmbeddingExtractorConfig=EmbeddingConfig,
+            FastClusteringConfig=ClusteringConfig,
+            OfflineSpeakerDiarizationConfig=DiarizationConfig,
+            OfflineSpeakerDiarization=Diarizer,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model = root / "model"
+            model.mkdir()
+            (model / "pyannote-segmentation.onnx").write_bytes(b"seg")
+            (model / "3dspeaker-embedding.onnx").write_bytes(b"emb")
+            audio = root / "meeting.wav"
+            with wave.open(str(audio), "wb") as target:
+                target.setnchannels(1)
+                target.setsampwidth(2)
+                target.setframerate(16_000)
+                target.writeframes(b"\0\0" * 160)
+            messages: list[str] = []
+            checks = 0
+
+            def check_cancelled() -> None:
+                nonlocal checks
+                checks += 1
+
+            with patch.dict(sys.modules, {"sherpa_onnx": fake_module}):
+                segments = SherpaOnnxProvider._run_local(
+                    audio_path=audio,
+                    model_path=model,
+                    num_speakers=2,
+                    min_speakers=None,
+                    max_speakers=None,
+                    progress=messages.append,
+                    check_cancelled=check_cancelled,
+                )
+
+        segmentation = captured["segmentation"]
+        self.assertIsInstance(segmentation.pyannote, PyannoteConfig)
+        self.assertEqual(captured["clustering"].num_clusters, 2)
+        self.assertEqual(captured["sample_count"], 160)
+        self.assertGreaterEqual(checks, 2)
+        self.assertIn("Sherpa-ONNX 说话人分段 50%", messages)
+        self.assertEqual(
+            segments,
+            [(0.0, 0.5, "provider-speaker-1"), (0.5, 1.0, "provider-speaker-0")],
+        )
 
 
 if __name__ == "__main__":

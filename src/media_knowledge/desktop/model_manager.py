@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
+from ..ingestion.diarization.sherpa_provider import find_sherpa_onnx_models
 from ..product import ProductPaths
 
 
@@ -122,6 +123,16 @@ MODEL_SPECS: tuple[LocalModelSpec, ...] = (
         "pyannote/speaker-diarization-community-1", "diarization", 2.5, "CC-BY-4.0",
         "离线区分多位说话人；首次下载需先在 Hugging Face 接受使用条件。", True,
     ),
+    LocalModelSpec(
+        "sherpa-speaker-diarization-zh",
+        "Sherpa-ONNX 中文会议·说话人识别",
+        "sherpa-onnx",
+        None,
+        "diarization",
+        0.1,
+        "MIT + Apache-2.0",
+        "轻量级纯本地说话人分段；导入目录必须同时包含 segmentation 和 embedding ONNX 模型。",
+    ),
 )
 
 
@@ -143,14 +154,23 @@ def _directory_size(path: Path) -> int:
     return total
 
 
-def _has_model_files(path: Path) -> bool:
+def _has_model_files(path: Path, spec: LocalModelSpec) -> bool:
     if not path.is_dir():
         return False
+    if spec.model_id == "sherpa-speaker-diarization-zh":
+        segmentation, embedding = find_sherpa_onnx_models(path)
+        return segmentation is not None and embedding is not None
     names = {child.name for child in path.iterdir() if child.is_file()}
     return bool(
         names.intersection({"config.json", "config.yaml", "model.safetensors", "weights.npz"})
         or any(path.glob("*.safetensors"))
     )
+
+
+def _invalid_model_message(spec: LocalModelSpec) -> str:
+    if spec.model_id == "sherpa-speaker-diarization-zh":
+        return "所选目录不是完整的 Sherpa 说话人模型（需同时包含 segmentation 和 embedding ONNX）"
+    return "所选目录不是可识别的模型目录（缺少 config 或权重文件）"
 
 
 def _content_sha256(
@@ -282,14 +302,14 @@ class LocalModelManager:
 
             result = snapshot_download(spec.repo_id, local_files_only=True)
             candidate = Path(result).resolve()
-            return candidate if _has_model_files(candidate) else None
+            return candidate if _has_model_files(candidate, spec) else None
         except Exception:
             return None
 
     def resolve(self, model_id: str, *, include_huggingface_cache: bool = True) -> Path | None:
         spec = self.spec(model_id)
         candidate, _source = self._registered_path(model_id)
-        if candidate and _has_model_files(candidate):
+        if candidate and _has_model_files(candidate, spec):
             return candidate
         return self._cached_huggingface_path(spec) if include_huggingface_cache else None
 
@@ -297,7 +317,7 @@ class LocalModelManager:
         spec = self.spec(model_id)
         registry_value = self._load_registry().get(model_id) or {}
         candidate, source = self._registered_path(model_id)
-        if not candidate or not _has_model_files(candidate):
+        if not candidate or not _has_model_files(candidate, spec):
             candidate = self._cached_huggingface_path(spec)
             source = "huggingface-cache" if candidate else None
         if not candidate:
@@ -305,7 +325,7 @@ class LocalModelManager:
         size = _directory_size(candidate)
         content_sha256 = str(registry_value.get("sha256") or "") or None
         verification_error = str(registry_value.get("verification_error") or "") or None
-        structurally_valid = _has_model_files(candidate)
+        structurally_valid = _has_model_files(candidate, spec)
         return LocalModelStatus(
             spec,
             True,
@@ -356,17 +376,23 @@ class LocalModelManager:
         check_cancelled: Callable[[], None] | None = None,
     ) -> LocalModelStatus:
         path = Path(source).expanduser().resolve()
-        if not _has_model_files(path):
-            raise ValueError("所选目录不是可识别的模型目录（缺少 config 或权重文件）")
+        spec = self.spec(model_id)
+        if not _has_model_files(path, spec):
+            raise ValueError(_invalid_model_message(spec))
         if progress:
             progress("正在读取并校验已有模型目录")
         checksum = _content_sha256(
             path, progress=progress, check_cancelled=check_cancelled
         )
+        source_kind = (
+            "managed"
+            if path == self._default_path(model_id).resolve()
+            else "external"
+        )
         values = self._load_registry()
         values[model_id] = {
             "path": str(path),
-            "source": "external",
+            "source": source_kind,
             "registered_at": int(time.time()),
             "sha256": checksum,
             "verified_at": int(time.time()),
@@ -383,8 +409,9 @@ class LocalModelManager:
         check_cancelled: Callable[[], None] | None = None,
     ) -> LocalModelStatus:
         source_path = Path(source).expanduser().resolve()
-        if not _has_model_files(source_path):
-            raise ValueError("所选目录不是可识别的模型目录（缺少 config 或权重文件）")
+        spec = self.spec(model_id)
+        if not _has_model_files(source_path, spec):
+            raise ValueError(_invalid_model_message(spec))
         destination = self._default_path(model_id)
         if destination.exists():
             raise FileExistsError("该模型已存在；请先移除后再导入")
@@ -396,7 +423,7 @@ class LocalModelManager:
             shutil.copytree(source_path, staging)
             if check_cancelled:
                 check_cancelled()
-            if not _has_model_files(staging):
+            if not _has_model_files(staging, spec):
                 raise ValueError("复制后的模型校验失败")
             checksum = _content_sha256(
                 staging, progress=progress, check_cancelled=check_cancelled
@@ -451,7 +478,7 @@ class LocalModelManager:
             )
             if check_cancelled:
                 check_cancelled()
-            if not _has_model_files(staging):
+            if not _has_model_files(staging, spec):
                 raise RuntimeError("模型下载完成但校验失败")
             if progress:
                 progress("下载完成，正在计算模型内容 SHA-256")
