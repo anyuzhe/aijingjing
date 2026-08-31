@@ -39,14 +39,19 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         }
         self.assertIn(11, versions)
         status = self.database.status()
-        self.assertEqual(status["schema_version"], 13)
+        self.assertEqual(status["schema_version"], 14)
         for table in (
             "knowledge_items",
             "knowledge_aliases",
             "knowledge_item_tags",
             "knowledge_relations",
+            "knowledge_proposals",
+            "source_assessments",
+            "workflow_templates",
+            "knowledge_events",
         ):
             self.assertEqual(status[table], 0)
+        self.assertEqual(status["knowledge_space_policies"], 1)
 
     def test_item_crud_accepts_formal_taxonomy_and_validates_links(self) -> None:
         created = []

@@ -564,6 +564,7 @@ class OfflineInferenceTests(unittest.TestCase):
                     )
                 )
         self.assertEqual(captured[0]["path_or_hf_repo"], str(cached.resolve()))
+        self.assertIs(captured[0]["condition_on_previous_text"], False)
 
     def test_faster_whisper_constructor_forbids_model_download(self) -> None:
         captured: list[dict[str, object]] = []
@@ -585,7 +586,8 @@ class OfflineInferenceTests(unittest.TestCase):
                 })
 
             def transcribe(self, audio, **kwargs):
-                del audio, kwargs
+                del audio
+                captured.append({"transcribe_kwargs": kwargs})
                 return [], types.SimpleNamespace(language="zh")
 
         fake_module = types.SimpleNamespace(WhisperModel=Model)
@@ -601,6 +603,7 @@ class OfflineInferenceTests(unittest.TestCase):
             )
         self.assertEqual(result.provider_id, "faster-whisper")
         self.assertIs(captured[0]["local_files_only"], True)
+        self.assertIs(captured[1]["transcribe_kwargs"]["condition_on_previous_text"], False)
 
 
 class CueBuilderTests(unittest.TestCase):

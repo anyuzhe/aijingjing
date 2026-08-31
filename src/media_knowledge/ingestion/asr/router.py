@@ -65,9 +65,10 @@ class AsrRouter:
                 AsrAttempt("faster-whisper", "small", None, "cpu", "int8"),
             ]
         elif provider == "mlx-whisper":
+            fallback_model = "small" if "turbo-q4" in model.casefold() else model
             attempts = [
                 AsrAttempt("mlx-whisper", model, request.model_path, "metal", "float16"),
-                AsrAttempt("faster-whisper", model, None, "cpu", "int8"),
+                AsrAttempt("faster-whisper", fallback_model, None, "cpu", "int8"),
             ]
         elif provider == "faster-whisper":
             attempts = [AsrAttempt(
@@ -103,9 +104,10 @@ class AsrRouter:
                 AsrAttempt("faster-whisper", "small", None, "cpu", "int8", word_timestamps=False),
             ]
         elif profile == "compatibility":
+            fallback_model = "small" if "turbo-q4" in model.casefold() else model
             attempts = [
                 AsrAttempt("mlx-whisper", model, request.model_path, "metal", "float16"),
-                AsrAttempt("faster-whisper", model, None, "cpu", "int8"),
+                AsrAttempt("faster-whisper", fallback_model, None, "cpu", "int8"),
             ]
         else:
             inferred = "qwen3-mlx" if "qwen3-asr" in model.casefold() else "mlx-whisper"

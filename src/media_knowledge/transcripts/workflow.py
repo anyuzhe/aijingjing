@@ -13,7 +13,7 @@ from ..models import utcnow_iso
 from ..product import DesktopSettings, ProductPaths
 from ..providers.web import DuckDuckGoWebSearchProvider, WebSearchProvider
 from ..runtime import build_answer_provider
-from ..storage import KnowledgeDatabase
+from ..storage import KnowledgeDatabase, KnowledgeOperationsRepository
 from .deep_correction import (
     CorrectionAuditItem,
     CorrectionLLM,
@@ -165,7 +165,34 @@ class DeepCorrectionWorkflow:
 
                 external = ()
                 collection_warnings: list[str] = []
-                if self.settings.deep_correction_web_verification:
+                operations = KnowledgeOperationsRepository(database)
+                existing_policy = database.connection.execute(
+                    "SELECT 1 FROM knowledge_space_policies WHERE id=?",
+                    (self.settings.asr_knowledge_space_id,),
+                ).fetchone()
+                if existing_policy is None:
+                    operations.upsert_policy(
+                        self.settings.asr_knowledge_space_id,
+                        self.settings.asr_knowledge_space_id,
+                        {
+                            "auto_propose": True,
+                            "conflict_policy": "warn",
+                            "default_source_reliability": "unassessed",
+                            "external_verification": self.settings.deep_correction_web_verification,
+                            "require_review": True,
+                            "routing": "source-to-proposal-to-knowledge",
+                        },
+                    )
+                space_policy = operations.get_policy(self.settings.asr_knowledge_space_id)
+                allow_external = bool(
+                    self.settings.deep_correction_web_verification
+                    and space_policy.policy.get("external_verification", False)
+                )
+                if self.settings.deep_correction_web_verification and not allow_external:
+                    collection_warnings.append(
+                        "知识空间策略未允许外部核验，本次未执行联网搜索"
+                    )
+                if allow_external:
                     collection = collect_external_evidence(
                         transcript,
                         self.web_provider,
@@ -273,9 +300,28 @@ class DeepCorrectionWorkflow:
                 )
                 emit("quality_gate", 10, 11, "完整性、引用和原稿差异审计已通过")
                 export = self._export(database, correction_run.id, transcript.source.name)
+                subtitles = self._export_subtitles(
+                    database, correction_run.id, transcript.source.name, overwrite=False
+                )
+                proposal_ids = self._create_knowledge_proposals(
+                    database,
+                    result,
+                    correction_run_id=correction_run.id,
+                    source_document_id=source_run.document_id,
+                )
                 snapshot = self._snapshot(database, correction_run.id)
                 snapshot["output_path"] = str(export.path)
                 snapshot["output_checksum"] = export.sha256
+                snapshot["subtitle_paths"] = {
+                    "srt": str(subtitles.srt_path),
+                    "vtt": str(subtitles.vtt_path),
+                }
+                snapshot["subtitle_integrity"] = {
+                    "status": "pass",
+                    "cue_count": subtitles.cue_count,
+                    "sha256": subtitles.sha256,
+                }
+                snapshot["knowledge_proposal_ids"] = proposal_ids
                 snapshot["auto_accepted_change_ids"] = auto_accepted
                 return snapshot
             except DeepCorrectionCancelled as exc:
@@ -358,10 +404,17 @@ class DeepCorrectionWorkflow:
                 overwrite=overwrite,
                 allowed_root=self.paths.transcripts,
             )
+            subtitles = self._export_subtitles(
+                database, run.id, transcript.source.name, overwrite=overwrite
+            )
             return {
                 "path": str(exported.path),
                 "sha256": exported.sha256,
                 "bytes_written": exported.bytes_written,
+                "srt_path": str(subtitles.srt_path),
+                "vtt_path": str(subtitles.vtt_path),
+                "subtitle_cue_count": subtitles.cue_count,
+                "subtitle_sha256": subtitles.sha256,
                 "existing": False,
             }
 
@@ -674,6 +727,79 @@ class DeepCorrectionWorkflow:
             self._default_output_path(correction_run_id, source_name),
             allowed_root=self.paths.transcripts,
         )
+
+    def _export_subtitles(
+        self,
+        database: KnowledgeDatabase,
+        correction_run_id: str,
+        source_name: str,
+        *,
+        overwrite: bool,
+    ):
+        stem = (
+            _safe_stem(source_name, "transcript")
+            + f"-完整精校转写-说话人版-{correction_run_id[-8:]}"
+        )
+        return DeepCorrectionMarkdownExporter(
+            DeepCorrectionRepository(database)
+        ).export_subtitles(
+            correction_run_id,
+            self.paths.transcripts,
+            stem,
+            overwrite=overwrite,
+            allowed_root=self.paths.transcripts,
+        )
+
+    def _create_knowledge_proposals(
+        self,
+        database: KnowledgeDatabase,
+        result: DeepCorrectionResult,
+        *,
+        correction_run_id: str,
+        source_document_id: str | None,
+    ) -> list[str]:
+        operations = KnowledgeOperationsRepository(database)
+        policy = operations.get_policy(self.settings.asr_knowledge_space_id)
+        if not bool(policy.policy.get("auto_propose", True)):
+            return []
+        entity_by_segment: dict[str, list[str]] = {}
+        for entity in result.entities:
+            for segment_id in entity.segment_ids:
+                entity_by_segment.setdefault(segment_id, []).append(entity.canonical)
+        proposal_ids: list[str] = []
+        for card in result.knowledge_cards:
+            aliases = tuple(
+                dict.fromkeys(
+                    name
+                    for segment_id in card.evidence_segment_ids
+                    for name in entity_by_segment.get(segment_id, ())
+                    if name.casefold() != card.title.casefold()
+                )
+            )
+            related_confidence = [
+                item.confidence
+                for item in result.audit
+                if item.segment_id in card.evidence_segment_ids
+            ]
+            proposal = operations.create_proposal(
+                title=card.title,
+                body=card.content,
+                proposed_type="topic",
+                summary=card.content[:240],
+                source_document_id=source_document_id,
+                correction_run_id=correction_run_id,
+                aliases=aliases,
+                tags=("深度精校", "知识候选"),
+                source_segment_ids=card.evidence_segment_ids,
+                confidence=min(related_confidence) if related_confidence else None,
+                metadata={
+                    "generated_from": "deep-correction-knowledge-card",
+                    "knowledge_space_id": self.settings.asr_knowledge_space_id,
+                    "requires_review": bool(policy.policy.get("require_review", True)),
+                },
+            )
+            proposal_ids.append(proposal.id)
+        return proposal_ids
 
     def _write_latest_v2(self, database: KnowledgeDatabase, transcript_run_id: str) -> Path:
         repository = TranscriptRepository(database)

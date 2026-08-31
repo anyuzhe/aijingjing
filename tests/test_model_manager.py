@@ -44,6 +44,12 @@ class LocalModelManagerTests(unittest.TestCase):
         self.assertFalse(status.installed)
         local.assert_called_once()
 
+    def test_turbo_q4_model_is_available_as_explicit_apple_option(self) -> None:
+        spec = self.manager.spec("whisper-large-v3-turbo-q4-mlx")
+        self.assertEqual(spec.provider, "mlx-whisper")
+        self.assertEqual(spec.repo_id, "mlx-community/whisper-large-v3-turbo-q4")
+        self.assertLess(spec.approximate_size_gb, 1.5)
+
     def test_external_registration_is_preserved_when_removed(self) -> None:
         external = _fake_model(Path(self.temporary.name) / "external-qwen")
         status = self.manager.register_path("qwen3-asr-1.7b-mlx", external)

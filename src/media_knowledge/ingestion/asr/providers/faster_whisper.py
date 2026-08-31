@@ -67,6 +67,9 @@ class FasterWhisperProvider:
             kwargs: dict[str, object] = {
                 "vad_filter": True,
                 "word_timestamps": request.word_timestamps,
+                # Long Chinese recordings can enter a repetition loop when the
+                # decoder continuously conditions on its own previous output.
+                "condition_on_previous_text": False,
             }
             language = whisper_language(request.language)
             if language:

@@ -74,6 +74,16 @@ MODEL_SPECS: tuple[LocalModelSpec, ...] = (
         "Apple Silicon 兼容高精度模型，也是 Qwen 不可用时的首选回退。",
     ),
     LocalModelSpec(
+        "whisper-large-v3-turbo-q4-mlx",
+        "Whisper Large v3 Turbo Q4 · MLX",
+        "mlx-whisper",
+        "mlx-community/whisper-large-v3-turbo-q4",
+        "asr",
+        0.9,
+        "MIT",
+        "Apple Silicon 长音频推荐档：更快、更省内存，并关闭跨段自条件以降低中文重复循环。",
+    ),
+    LocalModelSpec(
         "whisper-medium-mlx", "Whisper Medium · MLX", "mlx-whisper",
         "mlx-community/whisper-medium-mlx", "asr", 1.6, "MIT",
         "精度和模型体积之间的兼容档。",

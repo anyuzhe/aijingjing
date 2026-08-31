@@ -26,6 +26,8 @@ def mlx_whisper_model(model: str) -> str:
     value = str(model or "small").strip()
     if "/" in value or Path(value).expanduser().exists():
         return value
+    if value == "large-v3-turbo-q4":
+        return "mlx-community/whisper-large-v3-turbo-q4"
     if value.endswith("-mlx"):
         return f"mlx-community/{value}"
     return f"mlx-community/whisper-{value}-mlx"
@@ -80,6 +82,7 @@ class MlxWhisperProvider:
         kwargs: dict[str, object] = {
             "path_or_hf_repo": model_reference,
             "word_timestamps": request.word_timestamps,
+            "condition_on_previous_text": False,
         }
         language = whisper_language(request.language)
         if language:

@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
     <img src="https://img.shields.io/badge/Test-pytest-2F855A" alt="pytest">
-    <img src="https://img.shields.io/badge/Version-2.4.0-4C8FBF" alt="Version 2.4.0">
+    <img src="https://img.shields.io/badge/Version-2.5.0-4C8FBF" alt="Version 2.5.0">
   </p>
 </div>
 
@@ -99,7 +99,8 @@ Speaker Markdown / chapters / knowledge cards / Mermaid knowledge graph
 - LLM output must be strict structured JSON and preserve every `segment_id`, start/end time, and speaker mapping. Missing segments, out-of-bounds locators, invented timestamps, ungrounded quotes, and silent deletion are rejected.
 - External verification is off by default. When explicitly enabled, only bounded queries are sent to the search provider. Web text is always untrusted data: the model may cite only injected evidence IDs, original URLs, and quotes that occur verbatim in the supplied snippet, and it may not follow instructions found on a page. When support is insufficient, the original meaning is retained with `［needs verification］`, `［term needs verification］`, `［inaudible］`, or `［ASR decode failure］` instead of filling gaps for fluency.
 - Every proposal stores `before / after / reason / confidence / evidence` and can be accepted or rejected individually. Original `raw_text` is never overwritten; accepted changes enter a separate correction layer, and checkpoints support progress, cancellation, and resume.
-- Markdown exports can include the complete timeline, speakers, chapters, unresolved terms, a full raw-versus-corrected audit table, knowledge cards, and a Mermaid diagram. Knowledge synthesis remains a derived artifact, never a replacement for the transcript.
+- Markdown exports can include the complete timeline, speakers, chapters, unresolved terms, a full raw-versus-corrected audit table, knowledge cards, and a Mermaid diagram. Corrected SRT/VTT files are emitted with validated source mapping, ordering, bounds, and coverage.
+- Apple Silicon now has an explicit `Whisper Large v3 Turbo Q4` long-audio option. Whisper routes disable `condition_on_previous_text` to reduce repetition loops in long Chinese recordings.
 
 Model weights are not bundled. Large-v3, Qwen3-ASR, and diarization weights must be downloaded explicitly in the model manager or registered from an existing local directory. Missing weights never trigger a silent download or a false successful re-recognition result.
 
@@ -111,6 +112,11 @@ Model weights are not bundled. Large-v3, Qwen3-ASR, and diarization weights must
 - Track unreviewed, indexed, summarized, compiled, and low-value maturity levels.
 - Model `supports`, `extends`, `contradicts`, `supersedes`, and `opens` relations with bidirectional queries.
 - Promote an answer into durable knowledge with one action, write an owned Markdown note, and connect its real source evidence. AI-generated items default to `needs-review`.
+- Deep-correction knowledge cards first enter a review queue with deterministic title/alias duplicate detection. Users may accept them as review-required knowledge, merge into an existing item, or reject them; model suggestions never become confirmed facts directly.
+- Every knowledge space has a structured policy for proposals, review gates, default source reliability, external verification, conflict handling, and model/transcription routes. Policy keys are allowlisted and never execute external `AGENTS.md` files or arbitrary scripts.
+- The Knowledge Operations Center combines proposal review, source reliability/validity/extraction completeness, explicit conflicts, duplicate groups, golden-set evaluation, and a documented SOP library.
+- SOPs store reviewable steps, triggers, model boundaries, and privacy boundaries as data, not arbitrary executable code.
+- SQLite facts compile into a portable `LLM-Wiki` with frontmatter, type catalogs, tag indexes, raw/output status pages, graph links, and an operation log. SQLite remains the source of truth.
 - Run health checks for orphaned items, missing provenance, empty bodies, staleness, inconsistent tags, alias collisions, and uncompiled high-value sources, with actionable recovery guidance.
 - Atomically preserve a tombstone, Markdown note, aliases, tags, and graph edges before deletion; restore the original item ID and every still-valid relation from **Knowledge → Trash** without deleting source material.
 
@@ -287,11 +293,15 @@ Open **Settings → Multimedia Parsing**, choose a profile, Provider, model, pri
 
 - `Qwen3-ASR 1.7B`: the high-accuracy profile for Chinese meetings, courses, and technical material, approximately 2.2 GB;
 - `Qwen3-ASR 0.6B`: a speed- and memory-oriented preview profile, approximately 0.9 GB;
-- Whisper: `tiny / base / small / medium / large-v3`, with Apple MLX and faster-whisper CTranslate2 weights managed separately and never mixed;
+- Whisper: `tiny / base / small / medium / large-v3`, plus Apple Silicon's long-audio `large-v3-turbo-q4`; Apple MLX and faster-whisper CTranslate2 weights are managed separately and never mixed;
 - Sherpa-ONNX: lightweight, fully local speaker diarization; registration requires both a pyannote segmentation ONNX model and a 3D-Speaker embedding ONNX model;
 - pyannote Community-1: an optional local diarization model whose upstream terms must be accepted on Hugging Face before obtaining weights.
 
 The model manager can register an existing directory, copy it into managed storage, or explicitly download entries backed by a trusted Hugging Face repository. The dual-ONNX Sherpa bundle uses import/registration. Merely inspecting status, starting the app, or importing media does not download a model. A missing selected weight produces a clear install/register/switch-route message. Media ingestion currently processes existing local files or lawfully obtained media; it does not provide microphone capture, live recording, or real-time streaming transcription.
+
+### Use the Knowledge Operations Center
+
+Open **Knowledge** in the left sidebar and select **Knowledge Operations Center**, use **Knowledge Base → Knowledge Operations Center**, or press `Ctrl+Shift+K`. Proposal review, source/conflict checks, golden evaluation, SOPs, and portable Wiki compilation live there. Per-space policy is under **Settings → Knowledge Space Policy**; ASR models remain under **Settings → Multimedia Parsing**, and semantic correction models are under **Settings → Deep Correction**.
 
 ## CLI
 
@@ -367,7 +377,7 @@ pip install pytest
 pytest -q
 ```
 
-The 2.4.0 test suite covers ASR Provider routing, local model lifecycle and content verification, audio preflight/normalization/VAD, persistent crash recovery, Qwen3-ASR/Whisper fallback, scoped glossaries, diarization, Transcript V2, issue detection, continuous overlapping chunks, interval re-recognition, strict structured correction, external-evidence validation, timeline preservation, per-change audits, deferred-index quality gating, playback, human correction, evidence-layered synthesis, and indexing bridges, as well as chunking, atomic indexing, database migrations, knowledge governance, OCR, public-media safety, content-addressed archives, privacy sharing, backup restore, and desktop behavior.
+The 2.5.0 suite covers ASR routing, model lifecycle and content verification, Turbo Q4, long-Chinese decoder protection, audio preparation, crash recovery, Qwen3-ASR/Whisper fallback, scoped glossaries, diarization, Transcript V2, interval re-recognition, strict correction, corrected SRT/VTT integrity, proposal review, knowledge-space policy, source assessment, SOPs, portable Wiki compilation, golden-set evaluation, evidence validation, timeline/audit behavior, deferred indexing, playback, human correction, synthesis, and the existing indexing, governance, OCR, public-media safety, backup, privacy, and desktop coverage.
 
 The repository also includes a local golden-set evaluation framework for Hit Rate@K, MRR, Citation Precision, and Citation Coverage. Replace the placeholder document and chunk IDs in the example with IDs from your own library, then run `knowledge eval`; add `--retrieval-only` to evaluate retrieval without answer generation.
 

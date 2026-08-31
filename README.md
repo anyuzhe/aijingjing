@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
     <img src="https://img.shields.io/badge/Test-pytest-2F855A" alt="pytest">
-    <img src="https://img.shields.io/badge/Version-2.4.0-4C8FBF" alt="Version 2.4.0">
+    <img src="https://img.shields.io/badge/Version-2.5.0-4C8FBF" alt="Version 2.5.0">
   </p>
 </div>
 
@@ -99,7 +99,8 @@ Transcript V2 原始识别（只读）
 - LLM 必须返回严格结构化 JSON，并保持每个 `segment_id`、开始/结束时间和说话人映射。系统拒绝缺片段、越界定位、伪造时间戳、无法对应原文的引用和静默删除内容。
 - 外部核验默认关闭。开启后只把有界查询发送给检索服务；网页文本始终作为不可信数据，模型只能引用注入结果中的证据 ID、原 URL 和逐字存在的摘录，不能执行网页中的指令。证据不足时保留原意并标记 `［待核实］`、`［术语待核实］`、`［听辨不清］` 或 `［ASR解码失败］`，不会为了流畅而补写事实。
 - 每项建议保存 `before / after / reason / confidence / evidence`，可以逐条接受或拒绝。原始 `raw_text` 永不覆盖；获批内容写入独立校订层，检查点允许暂停、取消和恢复。
-- 导出的 Markdown 可同时包含完整时间轴、说话人、章节、术语待核实表、全量原稿/精校稿差异审计、知识卡片和 Mermaid 图；知识提炼仍然是原始转写之外的派生结果。
+- 导出的 Markdown 可同时包含完整时间轴、说话人、章节、术语待核实表、全量原稿/精校稿差异审计、知识卡片和 Mermaid 图；同时生成经过片段映射、顺序、边界和覆盖校验的精校版 SRT/VTT。
+- Apple Silicon 新增 `Whisper Large v3 Turbo Q4` 长音频档；Whisper 路线显式关闭 `condition_on_previous_text`，降低长中文重复解码循环。
 
 模型权重不随安装包分发。Large-v3、Qwen3-ASR 和说话人模型需由用户在模型管理器中显式下载或登记已有本地目录；没有相应权重时不会静默联网或假装完成局部重识别。
 
@@ -111,6 +112,11 @@ Transcript V2 原始识别（只读）
 - 支持未检查、已索引、已总结、已沉淀、低价值保留 5 档成熟度。
 - 支持 `supports`、`extends`、`contradicts`、`supersedes`、`opens` 关系与双向查询。
 - 回答可一键“沉淀为知识”，自动生成 Markdown 笔记并关联本轮真实来源；AI 内容默认进入“需要复核”。
+- 深度精校知识卡先进入“候选审核”，按标题和别名做确定性去重；可接受为待复核知识、合并到已有知识或拒绝，不会直接写成确定事实。
+- 每个知识空间拥有结构化策略：候选开关、人工复核门禁、来源默认可靠性、外部核验许可、冲突处理和模型/转写路线。策略字段采用允许列表，不执行外部 `AGENTS.md` 或任意脚本。
+- “知识运营中心”统一提供候选审核、来源可靠性/有效期/解析完整度、显式冲突、重复资料、黄金问题集评测和 SOP 流程库。
+- SOP 以步骤、触发条件、模型边界和隐私边界保存，是可审查的流程资产，不是任意代码执行器。
+- 可一键从 SQLite 事实编译便携 `LLM-Wiki`，包含 frontmatter、类型目录、标签索引、原始资料/成果状态页、关系链接和知识操作日志；SQLite 仍是唯一事实源。
 - 知识体检会发现孤立知识、缺失来源、空正文、过期内容、标签不统一、别名冲突和高价值来源未编译，并给出恢复建议。
 - 删除正式知识前会先原子保存 tombstone、Markdown、别名、标签和知识关系；可在“知识 → 回收站”恢复原 ID 与仍有效的关系，原始资料不会被删除。
 
@@ -287,11 +293,15 @@ pip install -e '.[layout-ocr]'
 
 - `Qwen3-ASR 1.7B`：中文会议、课程与专业内容的高精度档，约 2.2 GB；
 - `Qwen3-ASR 0.6B`：速度与占用优先的快速预览档，约 0.9 GB；
-- Whisper：提供 `tiny / base / small / medium / large-v3` 多档，Apple MLX 与 faster-whisper CTranslate2 权重分别管理，绝不会混用；
+- Whisper：提供 `tiny / base / small / medium / large-v3` 多档，以及 Apple Silicon 长音频推荐的 `large-v3-turbo-q4`；Apple MLX 与 faster-whisper CTranslate2 权重分别管理，绝不会混用；
 - Sherpa-ONNX：轻量纯本地说话人分离；需同时登记 pyannote segmentation 与 3D-Speaker embedding 两个 ONNX 权重；
 - pyannote Community-1：可选本地说话人识别模型，首次取得权重前需在 Hugging Face 接受上游条款。
 
 模型管理器支持登记已有模型目录、复制导入，并且对具有受信 Hugging Face 仓库的条目支持用户主动下载；Sherpa 双 ONNX 组合使用导入/登记。仅查看状态、启动应用或导入音视频都不会联网下载模型；缺少所选权重时会明确提示安装、登记目录或切换路线。当前音视频入口只处理已有本地文件或已合法取得的媒体，不提供麦克风采集、实时录音或实时流式转写。
+
+### 使用知识运营中心
+
+在主界面左侧打开“知识”，点击“知识运营中心”；也可使用“知识库 → 知识运营中心”或 `Ctrl+Shift+K`。候选审核、来源与冲突、黄金评测、SOP 流程库和便携 Wiki 都在这里。空间级规则位于“设置 → 知识空间策略”；音视频模型仍在“设置 → 多媒体解析”，深度语义精校模型位于“设置 → 深度精校”。
 
 ## 命令行
 
@@ -367,7 +377,7 @@ pip install pytest
 pytest -q
 ```
 
-2.4.0 的自动化测试覆盖 ASR Provider 路由、本地模型生命周期与内容校验、音频预检/标准化/VAD、持久检查点与崩溃恢复、Qwen3-ASR/Whisper 降级、三层专业词库、说话人识别、Transcript V2、异常检测、连续重叠分块、局部重识别、严格结构化精校、外部证据校验、时间轴保真、逐条校订审计、延迟索引质量门禁、播放器、人工校订、证据分层知识提炼与索引桥接，以及分块、原子索引、数据库迁移、知识治理、OCR、公开视频安全、内容寻址归档、隐私分享、备份恢复和桌面产品行为。
+2.5.0 的自动化测试覆盖 ASR Provider 路由、本地模型生命周期与内容校验、Turbo Q4、长中文解码保护、音频预检/标准化/VAD、持久检查点与崩溃恢复、Qwen3-ASR/Whisper 降级、三层专业词库、说话人识别、Transcript V2、异常检测、连续重叠分块、局部重识别、严格结构化精校、精校 SRT/VTT 完整性、候选审核、知识空间策略、来源评估、SOP、便携 Wiki、黄金集评测、外部证据校验、时间轴保真、逐条校订审计、延迟索引质量门禁、播放器、人工校订、证据分层知识提炼与索引桥接，以及分块、原子索引、数据库迁移、知识治理、OCR、公开视频安全、内容寻址归档、隐私分享、备份恢复和桌面产品行为。
 
 仓库还提供本地黄金集评测框架，可计算 Hit Rate@K、MRR、Citation Precision 和 Citation Coverage。先把示例中的文档 ID、知识块 ID 换成自己的入库记录，再运行 `knowledge eval`；加 `--retrieval-only` 可只评估检索。
 

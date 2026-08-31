@@ -33,12 +33,15 @@ from ..storage import (
     IngestionJobRepository,
     KnowledgeDatabase,
     KnowledgeGovernanceRepository,
+    KnowledgeOperationsRepository,
     SQLiteVectorStore,
 )
 from ..transcripts import DeepCorrectionRepository, TranscriptRepository
 from ..transcripts.workflow import DeepCorrectionWorkflow
 from ..sync import ObsidianMarkdownSync, scan_folder
 from ..indexing import IndexingService
+from ..evaluation import GoldenEvaluator, load_golden_dataset
+from ..wiki import PortableWikiCompiler
 from .backup import create_backup as create_product_backup
 from .backup import restore_backup as restore_product_backup
 from .model_manager import LocalModelManager
@@ -461,6 +464,200 @@ class DesktopController:
             result["relations"] = relations
             return result
 
+    def compile_portable_wiki(self) -> dict[str, object]:
+        """Rebuild the portable Markdown mirror from governed SQLite facts."""
+
+        with KnowledgeDatabase(self.paths.database) as database:
+            result = PortableWikiCompiler(
+                database, self.paths.notes / "LLM-Wiki"
+            ).compile()
+        return result.to_dict()
+
+    def knowledge_proposals(
+        self, *, include_reviewed: bool = False, limit: int = 500
+    ) -> list[dict[str, object]]:
+        statuses = () if include_reviewed else ("proposed",)
+        with KnowledgeDatabase(self.paths.database) as database:
+            values = KnowledgeOperationsRepository(database).list_proposals(
+                statuses=statuses, limit=limit
+            )
+        return [value.to_dict() for value in values]
+
+    def review_knowledge_proposal(
+        self,
+        proposal_id: str,
+        *,
+        decision: str,
+        merge_duplicate: bool = False,
+        reason: str = "人工复核",
+    ) -> dict[str, object]:
+        clean = str(decision or "").strip().casefold()
+        with KnowledgeDatabase(self.paths.database) as database:
+            operations = KnowledgeOperationsRepository(database)
+            proposal = operations.get_proposal(proposal_id)
+            if clean == "reject":
+                reviewed = operations.reject_proposal(proposal_id, reason=reason)
+                result: dict[str, object] = {
+                    "proposal": reviewed.to_dict(), "item": None
+                }
+            elif clean == "accept":
+                item = operations.accept_proposal(
+                    proposal_id, merge_duplicate=merge_duplicate
+                )
+                repository = KnowledgeGovernanceRepository(database)
+                metadata = dict(item.metadata)
+                if not metadata.get("note_relative_path"):
+                    relative = (
+                        Path("正式知识")
+                        / item.item_type
+                        / self._safe_note_name(item.title, item.item_id)
+                    )
+                    metadata["note_relative_path"] = relative.as_posix()
+                metadata["managed_from"] = metadata.get(
+                    "managed_from", "knowledge-proposal"
+                )
+                evidence_sources: list[dict[str, object]] = []
+                if proposal.source_document_id:
+                    document = database.get_document(proposal.source_document_id)
+                    if document is not None:
+                        evidence_sources.append(
+                            {
+                                "document_id": proposal.source_document_id,
+                                "title": str(document["title"]),
+                                "media_type": str(document["media_type"]),
+                            }
+                        )
+                if evidence_sources:
+                    existing = metadata.get("evidence_sources")
+                    metadata["evidence_sources"] = list(existing) if isinstance(existing, list) else []
+                    metadata["evidence_sources"].extend(evidence_sources)
+                item = repository.update_item(item.item_id, metadata=metadata)
+                value = item.to_dict()
+                note = self._governed_note_path(metadata)
+                if note is not None:
+                    _atomic_text(note, self._governed_note_markdown(value))
+                result = {
+                    "proposal": operations.get_proposal(proposal_id).to_dict(),
+                    "item": value,
+                }
+            else:
+                raise ValueError("decision 只能是 accept 或 reject")
+            result["wiki"] = PortableWikiCompiler(
+                database, self.paths.notes / "LLM-Wiki"
+            ).compile().to_dict()
+            return result
+
+    def knowledge_space_policy(self, policy_id: str | None = None) -> dict[str, object]:
+        clean_id = (policy_id or self.settings.asr_knowledge_space_id).strip()
+        with KnowledgeDatabase(self.paths.database) as database:
+            return KnowledgeOperationsRepository(database).get_policy(clean_id).to_dict()
+
+    def save_knowledge_space_policy(
+        self,
+        *,
+        policy_id: str,
+        name: str,
+        policy: dict[str, object],
+    ) -> dict[str, object]:
+        with KnowledgeDatabase(self.paths.database) as database:
+            value = KnowledgeOperationsRepository(database).upsert_policy(
+                policy_id, name, policy
+            )
+        return value.to_dict()
+
+    def source_assessment(self, document_id: str) -> dict[str, object]:
+        with KnowledgeDatabase(self.paths.database) as database:
+            return KnowledgeOperationsRepository(database).get_source_assessment(
+                document_id
+            ).to_dict()
+
+    def save_source_assessment(
+        self, document_id: str, **changes: object
+    ) -> dict[str, object]:
+        allowed = {
+            "source_class", "reliability", "extraction_completeness",
+            "published_at", "valid_until", "notes", "checked", "metadata",
+        }
+        invalid = set(changes) - allowed
+        if invalid:
+            raise ValueError(f"不支持的来源评估字段：{', '.join(sorted(invalid))}")
+        with KnowledgeDatabase(self.paths.database) as database:
+            value = KnowledgeOperationsRepository(database).upsert_source_assessment(
+                document_id, **changes
+            )
+        return value.to_dict()
+
+    def source_quality_center(self) -> dict[str, object]:
+        with KnowledgeDatabase(self.paths.database) as database:
+            operations = KnowledgeOperationsRepository(database)
+            issues = operations.source_quality_issues()
+            governance = KnowledgeGovernanceRepository(database)
+            contradictions = []
+            for relation in governance.list_relations(
+                relation_types=("contradicts",), limit=1000
+            ):
+                source = governance.get_item(relation.source_item_id)
+                target = governance.get_item(relation.target_item_id)
+                contradictions.append({
+                    **relation.to_dict(),
+                    "source_title": source.title if source is not None else relation.source_item_id,
+                    "target_title": target.title if target is not None else relation.target_item_id,
+                })
+            duplicates = database.duplicate_groups()
+        return {
+            "issues": issues,
+            "contradictions": contradictions,
+            "duplicates": duplicates,
+            "counts": {
+                "issues": len(issues),
+                "contradictions": len(contradictions),
+                "duplicate_groups": len(duplicates),
+            },
+        }
+
+    def workflows(self, *, include_archived: bool = False) -> list[dict[str, object]]:
+        with KnowledgeDatabase(self.paths.database) as database:
+            values = KnowledgeOperationsRepository(database).list_workflows(
+                include_archived=include_archived
+            )
+        return [value.to_dict() for value in values]
+
+    def save_workflow(self, **value: object) -> dict[str, object]:
+        with KnowledgeDatabase(self.paths.database) as database:
+            workflow = KnowledgeOperationsRepository(database).upsert_workflow(**value)
+        return workflow.to_dict()
+
+    def run_golden_evaluation(
+        self,
+        dataset_path: str | Path,
+        *,
+        top_k: int = 10,
+        evaluate_citations: bool = False,
+        model_id: str | None = None,
+    ) -> dict[str, object]:
+        dataset = load_golden_dataset(dataset_path)
+        config = self.config()
+        embedding = build_embedding_provider(config)
+        with KnowledgeDatabase(self.paths.database) as database:
+            IndexingService(database, embedding).ensure_embedding_profile()
+            retriever = KnowledgeRetriever(
+                database, embedding,
+                rerank_provider=build_rerank_provider(config),
+            )
+            engine = None
+            if evaluate_citations:
+                engine = KnowledgeQAEngine(
+                    database,
+                    retriever,
+                    answer_provider=build_answer_provider(
+                        config,
+                        model_id=model_id or self.settings.default_model,
+                    ),
+                )
+            return GoldenEvaluator(retriever, qa_engine=engine).evaluate(
+                dataset, top_k=top_k, evaluate_citations=evaluate_citations
+            )
+
     def update_knowledge_item(self, item_id: str, **changes: object) -> dict[str, object]:
         allowed = {
             "item_type",
@@ -784,11 +981,14 @@ class DesktopController:
     def knowledge_health(self, *, stale_after_days: int = 120) -> dict[str, object]:
         with KnowledgeDatabase(self.paths.database) as database:
             repository = KnowledgeGovernanceRepository(database)
+            operations = KnowledgeOperationsRepository(database)
             raw = repository.health_report(stale_after_days=stale_after_days).to_dict()
             item_map = {
                 item.item_id: item
                 for item in repository.list_items(limit=1000)
             }
+            source_issues = operations.source_quality_issues()
+            proposal_count = len(operations.list_proposals(statuses=("proposed",), limit=2000))
         nested_counts = raw.get("counts") if isinstance(raw.get("counts"), dict) else {}
         by_status = (
             nested_counts.get("by_status")
@@ -816,6 +1016,17 @@ class DesktopController:
                     "suggestion": self._knowledge_issue_suggestion(code),
                 }
             )
+        for issue in source_issues:
+            normalized_issues.append(
+                {
+                    **issue,
+                    "category": issue.get("code", "source_quality"),
+                    "item_id": None,
+                    "item_title": issue.get("title"),
+                    "item_type": "source",
+                    "suggestion": "打开来源质量中心，补充来源类型、可靠性和有效期",
+                }
+            )
         return {
             **raw,
             "counts": {
@@ -823,6 +1034,8 @@ class DesktopController:
                 "needs_review": int(by_status.get("needs-review", 0)),
                 "stale": int(by_status.get("stale", 0)),
                 "current": int(by_status.get("current", 0)),
+                "proposals": proposal_count,
+                "source_quality_issues": len(source_issues),
                 "by_status": by_status,
                 "by_type": by_type,
             },
@@ -1083,8 +1296,28 @@ class DesktopController:
         result.job_id = active_job_id
         with KnowledgeDatabase(self.paths.database) as database:
             jobs = IngestionJobRepository(database)
+            operations = KnowledgeOperationsRepository(database)
+            policy = operations.get_policy(self.settings.asr_knowledge_space_id)
+            default_reliability = str(
+                policy.policy.get("default_source_reliability") or "unassessed"
+            )
             for item in result.results:
                 jobs.record_result(active_job_id, item.item, item.to_dict())
+                if item.document_id and database.get_document(item.document_id) is not None:
+                    assessment = operations.get_source_assessment(item.document_id)
+                    if (
+                        assessment.reliability == "unassessed"
+                        and default_reliability != "unassessed"
+                    ):
+                        operations.upsert_source_assessment(
+                            item.document_id,
+                            source_class=assessment.source_class,
+                            reliability=default_reliability,
+                            extraction_completeness=assessment.extraction_completeness,
+                            notes="由知识空间策略提供的默认值；尚未人工确认",
+                            checked=False,
+                            metadata={**assessment.metadata, "policy_default": True},
+                        )
             jobs.finalize_job(active_job_id)
         recent = [str(item) for item in values]
         self.settings.recent_imports = list(dict.fromkeys([*recent, *self.settings.recent_imports]))[:20]

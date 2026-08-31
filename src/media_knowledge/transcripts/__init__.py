@@ -14,7 +14,7 @@ from .deep_repository import (
     DeepCorrectionRepository,
     DeepCorrectionRunRecord,
 )
-from .exporter import DeepCorrectionMarkdownExporter, MarkdownExportResult
+from .exporter import DeepCorrectionMarkdownExporter, MarkdownExportResult, SubtitleExportResult
 from .quality import (
     TranscriptQualityIssue,
     TranscriptQualityReport,
@@ -69,6 +69,7 @@ __all__ = [
     "GlossaryTerm",
     "GlossaryTermInput",
     "MarkdownExportResult",
+    "SubtitleExportResult",
     "TranscriptEdit",
     "TranscriptQuality",
     "TranscriptQualityIssue",

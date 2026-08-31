@@ -10,7 +10,7 @@ from ..models import KnowledgeChunk, KnowledgeDocument, SearchFilters, SourceRef
 
 
 BASE_SCHEMA_VERSION = 8
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 class KnowledgeDatabase:
@@ -293,6 +293,7 @@ class KnowledgeDatabase:
             (11, self._migrate_knowledge_governance),
             (12, self._migrate_transcript_facts),
             (13, self._migrate_deep_correction_facts),
+            (14, self._migrate_knowledge_operations),
         )
         for version, migration in migrations:
             if version in applied:
@@ -753,6 +754,141 @@ class KnowledgeDatabase:
             """
         )
 
+    def _migrate_knowledge_operations(self) -> None:
+        """Add review, policy, source-trust, workflow and portable-wiki facts."""
+
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_space_policies (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                policy_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_knowledge_space_policies_updated
+                ON knowledge_space_policies(updated_at DESC, id);
+
+            CREATE TABLE IF NOT EXISTS knowledge_proposals (
+                id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL UNIQUE,
+                source_document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
+                correction_run_id TEXT REFERENCES correction_runs(id) ON DELETE SET NULL,
+                proposed_type TEXT NOT NULL CHECK(proposed_type IN (
+                    'topic', 'entity', 'analysis', 'decision'
+                )),
+                title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+                summary TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                aliases_json TEXT NOT NULL DEFAULT '[]',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                source_segment_ids_json TEXT NOT NULL DEFAULT '[]',
+                confidence REAL CHECK(confidence IS NULL OR (
+                    confidence >= 0 AND confidence <= 1
+                )),
+                status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN (
+                    'proposed', 'accepted', 'rejected', 'merged'
+                )),
+                duplicate_item_id TEXT REFERENCES knowledge_items(id) ON DELETE SET NULL,
+                accepted_item_id TEXT REFERENCES knowledge_items(id) ON DELETE SET NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                reviewed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_knowledge_proposals_status
+                ON knowledge_proposals(status, updated_at DESC, id);
+            CREATE INDEX IF NOT EXISTS idx_knowledge_proposals_source
+                ON knowledge_proposals(source_document_id, status, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS source_assessments (
+                document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+                source_class TEXT NOT NULL DEFAULT 'unassessed' CHECK(source_class IN (
+                    'unassessed', 'official', 'primary', 'research', 'industry',
+                    'media', 'community', 'personal'
+                )),
+                reliability TEXT NOT NULL DEFAULT 'unassessed' CHECK(reliability IN (
+                    'unassessed', 'high', 'medium', 'low'
+                )),
+                extraction_completeness REAL CHECK(extraction_completeness IS NULL OR (
+                    extraction_completeness >= 0 AND extraction_completeness <= 1
+                )),
+                published_at TEXT,
+                valid_until TEXT,
+                notes TEXT NOT NULL DEFAULT '',
+                checked_at TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_source_assessments_reliability
+                ON source_assessments(reliability, valid_until, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS workflow_templates (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+                description TEXT NOT NULL DEFAULT '',
+                trigger_json TEXT NOT NULL DEFAULT '{}',
+                steps_json TEXT NOT NULL DEFAULT '[]',
+                model_policy_json TEXT NOT NULL DEFAULT '{}',
+                privacy_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'current' CHECK(status IN ('current', 'archived')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_workflow_templates_status
+                ON workflow_templates(status, updated_at DESC, id);
+
+            CREATE TABLE IF NOT EXISTS knowledge_events (
+                id TEXT PRIMARY KEY,
+                item_id TEXT REFERENCES knowledge_items(id) ON DELETE SET NULL,
+                event_type TEXT NOT NULL CHECK(length(trim(event_type)) > 0),
+                summary TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_knowledge_events_created
+                ON knowledge_events(created_at DESC, id);
+            """
+        )
+        now = utcnow_iso()
+        self.connection.execute(
+            """INSERT OR IGNORE INTO knowledge_space_policies(
+                   id, name, policy_json, created_at, updated_at
+               ) VALUES ('local-default', '本地知识库', ?, ?, ?)""",
+            (
+                json.dumps(
+                    {
+                        "auto_propose": True,
+                        "conflict_policy": "warn",
+                        "default_source_reliability": "unassessed",
+                        "external_verification": False,
+                        "require_review": True,
+                        "routing": "source-to-proposal-to-knowledge",
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                now,
+                now,
+            ),
+        )
+        self.connection.execute(
+            """INSERT OR IGNORE INTO source_assessments(
+                   document_id, source_class, reliability, extraction_completeness,
+                   notes, metadata_json, created_at, updated_at
+               )
+               SELECT id, 'unassessed', 'unassessed',
+                      CASE WHEN json_valid(metadata_json)
+                                AND json_type(metadata_json, '$.quality_report.score')
+                                    IN ('integer', 'real')
+                           THEN MIN(1.0, MAX(0.0,
+                               json_extract(metadata_json, '$.quality_report.score') / 100.0))
+                           ELSE NULL END,
+                      '', '{"managed_from":"documents"}', created_at, updated_at
+               FROM documents"""
+        )
+
     def get_document_by_source_id(self, source_id: str) -> sqlite3.Row | None:
         return self.connection.execute(
             "SELECT * FROM documents WHERE source_id = ?", (source_id,)
@@ -845,6 +981,31 @@ class KnowledgeDatabase:
                 f"kg:document:{document.document_id}",
                 document.title,
                 document.document_id,
+                document.created_at,
+                document.updated_at,
+            ),
+        )
+        quality = document.metadata.get("quality_report")
+        quality_score = quality.get("score") if isinstance(quality, dict) else None
+        try:
+            completeness = min(1.0, max(0.0, float(quality_score) / 100.0))
+        except (TypeError, ValueError, OverflowError):
+            completeness = None
+        self.connection.execute(
+            """INSERT INTO source_assessments(
+                   document_id, source_class, reliability, extraction_completeness,
+                   notes, metadata_json, created_at, updated_at
+               ) VALUES (?, 'unassessed', 'unassessed', ?, '',
+                         '{"managed_from":"documents"}', ?, ?)
+               ON CONFLICT(document_id) DO UPDATE SET
+                   extraction_completeness=COALESCE(
+                       excluded.extraction_completeness,
+                       source_assessments.extraction_completeness
+                   ),
+                   updated_at=excluded.updated_at""",
+            (
+                document.document_id,
+                completeness,
                 document.created_at,
                 document.updated_at,
             ),
@@ -1476,6 +1637,8 @@ class KnowledgeDatabase:
             "transcript_edits", "asr_glossaries", "asr_glossary_terms",
             "correction_runs", "correction_paragraphs", "correction_changes",
             "correction_change_events", "correction_evidence",
+            "knowledge_space_policies", "knowledge_proposals", "source_assessments",
+            "workflow_templates", "knowledge_events",
         ):
             counts[table] = self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         states = {

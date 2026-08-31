@@ -1,6 +1,6 @@
 {
-  "version": "2.4.0",
-  "download_url": "https://downloads.example.com/AI-Jingjing-2.4.0-macOS-arm64-MLX.dmg",
-  "sha256": "6b27e871292052e5bf10e87cd879fd2655c8c0542d878fa222a9ab18a5357f09",
-  "notes": "AI静静 2.4：Large-v3/Qwen3-ASR、Sherpa-ONNX 说话人分离、异常区间重识别、跨片段语义精校、外部证据契约、不确定标注、差异审计与完整说话人 Markdown。"
+  "version": "2.5.0",
+  "download_url": "https://downloads.example.com/AI-Jingjing-2.5.0-macOS-arm64-MLX.dmg",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "notes": "AI静静 2.5：知识候选人工审核、空间策略、来源质量/冲突中心、黄金问题集、SOP、便携 LLM Wiki、Whisper Large v3 Turbo Q4，以及经过完整性校验的精校 SRT/VTT。发布前请替换下载地址和 SHA-256。"
 }

@@ -25,6 +25,14 @@ class MarkdownExportResult:
     bytes_written: int
 
 
+@dataclass(frozen=True, slots=True)
+class SubtitleExportResult:
+    srt_path: Path
+    vtt_path: Path
+    cue_count: int
+    sha256: dict[str, str]
+
+
 def safe_output_path(
     path: str | Path,
     *,
@@ -160,6 +168,100 @@ class DeepCorrectionMarkdownExporter:
         atomic_write_bytes(target, payload, overwrite=overwrite)
         self.repository.set_export_info(run.id, str(target), digest)
         return MarkdownExportResult(target, digest, len(payload))
+
+    def export_subtitles(
+        self,
+        run_id: str,
+        directory: str | Path,
+        basename: str,
+        *,
+        overwrite: bool = False,
+        allowed_root: str | Path | None = None,
+    ) -> SubtitleExportResult:
+        """Export corrected paragraph cues while proving timeline integrity."""
+
+        run = self.repository.get_run(run_id)
+        if run is None:
+            raise KeyError(f"深度精校任务不存在：{run_id}")
+        if run.status != "completed":
+            raise ValueError("只有已完成的精校任务可以导出字幕")
+        paragraphs = self.repository.list_paragraphs(run_id)
+        if not paragraphs:
+            raise ValueError("精校结果没有可导出的时间轴段落")
+        previous_end = 0
+        for index, paragraph in enumerate(paragraphs):
+            if paragraph.start_ms < previous_end or paragraph.end_ms <= paragraph.start_ms:
+                raise ValueError(f"精校字幕时间轴在第 {index + 1} 段不连续或重叠")
+            if not paragraph.source_segment_ids:
+                raise ValueError(f"精校字幕第 {index + 1} 段缺少原始片段映射")
+            previous_end = paragraph.end_ms
+        source = TranscriptRepository(self.repository.database).get_transcript(run.transcript_run_id)
+        if source is None or not source.segments:
+            raise ValueError("精校字幕关联的原始转写不存在")
+        mapped_segment_ids = [
+            segment_id
+            for paragraph in paragraphs
+            for segment_id in paragraph.source_segment_ids
+        ]
+        source_segment_ids = [segment.id for segment in source.segments]
+        if mapped_segment_ids != source_segment_ids:
+            raise ValueError("精校字幕没有按原始顺序完整覆盖每个转写片段")
+        if paragraphs[0].start_ms < source.segments[0].start_ms:
+            raise ValueError("精校字幕起点早于原始时间轴")
+        if paragraphs[-1].end_ms > source.segments[-1].end_ms:
+            raise ValueError("精校字幕终点超出原始时间轴")
+        safe_basename = _CONTROL_RE.sub("", str(basename or "").strip())
+        if (
+            not safe_basename
+            or Path(safe_basename).name != safe_basename
+            or safe_basename in {".", ".."}
+        ):
+            raise ValueError("精校字幕文件名无效")
+        root = Path(directory).expanduser().resolve(strict=False)
+        srt_path = safe_output_path(
+            root / f"{safe_basename}.corrected.srt",
+            suffixes=(".srt",), allowed_root=allowed_root,
+        )
+        vtt_path = safe_output_path(
+            root / f"{safe_basename}.corrected.vtt",
+            suffixes=(".vtt",), allowed_root=allowed_root,
+        )
+
+        def timestamp(milliseconds: int, *, srt: bool) -> str:
+            hours, remainder = divmod(max(0, int(milliseconds)), 3_600_000)
+            minutes, remainder = divmod(remainder, 60_000)
+            seconds, millis = divmod(remainder, 1000)
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}{',' if srt else '.'}{millis:03d}"
+
+        def text(value: object) -> str:
+            return _CONTROL_RE.sub("", str(value or "")).replace("-->", "→").strip()
+
+        srt_blocks = [
+            f"{index}\n{timestamp(item.start_ms, srt=True)} --> {timestamp(item.end_ms, srt=True)}\n{text(item.corrected_text)}"
+            for index, item in enumerate(paragraphs, 1)
+        ]
+        vtt_blocks = [
+            f"{timestamp(item.start_ms, srt=False)} --> {timestamp(item.end_ms, srt=False)}\n{text(item.corrected_text)}"
+            for item in paragraphs
+        ]
+        srt_payload = ("\n\n".join(srt_blocks) + "\n").encode("utf-8")
+        vtt_payload = ("WEBVTT\n\n" + "\n\n".join(vtt_blocks) + "\n").encode("utf-8")
+        atomic_write_bytes(srt_path, srt_payload, overwrite=overwrite)
+        try:
+            atomic_write_bytes(vtt_path, vtt_payload, overwrite=overwrite)
+        except BaseException:
+            if not overwrite:
+                srt_path.unlink(missing_ok=True)
+            raise
+        return SubtitleExportResult(
+            srt_path=srt_path,
+            vtt_path=vtt_path,
+            cue_count=len(paragraphs),
+            sha256={
+                "srt": hashlib.sha256(srt_payload).hexdigest(),
+                "vtt": hashlib.sha256(vtt_payload).hexdigest(),
+            },
+        )
 
     def _render(self, snapshot: Mapping[str, Any], transcript: object) -> str:
         run = snapshot["run"]
@@ -372,6 +474,7 @@ class DeepCorrectionMarkdownExporter:
 __all__ = [
     "DeepCorrectionMarkdownExporter",
     "MarkdownExportResult",
+    "SubtitleExportResult",
     "atomic_write_bytes",
     "safe_output_path",
 ]

@@ -72,6 +72,7 @@ from .deep_correction_dialog import (
 )
 from .diagnostics import run_diagnostics
 from .glossary_manager_dialog import GlossaryManagerDialog
+from .knowledge_operations_dialog import KnowledgeOperationsDialog
 from .transcript_editor import TranscriptEditorDialog
 
 
@@ -194,6 +195,10 @@ KNOWLEDGE_HEALTH_LABELS = {
     "compiled_without_source": "编译知识缺少来源",
     "noncanonical_tag": "标签不统一",
     "ambiguous_alias": "别名冲突",
+    "source_unassessed": "来源尚未评估",
+    "source_low_reliability": "来源可靠性较低",
+    "source_incomplete": "来源解析不完整",
+    "source_expired": "来源已经过期",
 }
 PRIVACY_CATEGORY_LABELS = {
     "private_key": "私钥",
@@ -1033,6 +1038,7 @@ class SettingsDialog(QDialog):
             ("Qwen3-ASR 1.7B（中文高精度）", "Qwen3-ASR-1.7B"),
             ("Qwen3-ASR 0.6B（快速预览）", "Qwen3-ASR-0.6B"),
             ("Whisper Large v3（高精度兼容）", "large-v3"),
+            ("Whisper Large v3 Turbo Q4（Apple 长音频推荐）", "large-v3-turbo-q4"),
             ("Whisper Medium", "medium"),
             ("Whisper Small", "small"),
             ("Whisper Base", "base"),
@@ -1292,6 +1298,74 @@ class SettingsDialog(QDialog):
         correction_scroll.setAccessibleName("深度精校设置")
         tabs.addTab(correction_scroll, "深度精校")
 
+        policy_tab = QWidget()
+        policy_form = QFormLayout(policy_tab)
+        try:
+            current_policy = controller.knowledge_space_policy(
+                controller.settings.asr_knowledge_space_id
+            )
+        except (OSError, ValueError):
+            current_policy = {
+                "id": controller.settings.asr_knowledge_space_id,
+                "name": controller.settings.asr_knowledge_space_id,
+                "policy": {},
+            }
+        policy_values = (
+            current_policy.get("policy")
+            if isinstance(current_policy.get("policy"), dict)
+            else {}
+        )
+        self.policy_name = QLineEdit(
+            str(current_policy.get("name") or controller.settings.asr_knowledge_space_id)
+        )
+        self.policy_name.setAccessibleName("知识空间名称")
+        policy_form.addRow("空间名称", self.policy_name)
+        self.policy_auto_propose = QCheckBox("深度精校知识卡进入候选审核队列")
+        self.policy_auto_propose.setChecked(bool(policy_values.get("auto_propose", True)))
+        policy_form.addRow("", self.policy_auto_propose)
+        self.policy_require_review = QCheckBox("AI 提炼内容必须人工复核后才能标记为当前有效")
+        self.policy_require_review.setChecked(bool(policy_values.get("require_review", True)))
+        policy_form.addRow("", self.policy_require_review)
+        self.policy_external_verification = QCheckBox("允许该知识空间使用公开网页做外部核验")
+        self.policy_external_verification.setChecked(
+            bool(policy_values.get("external_verification", False))
+        )
+        policy_form.addRow("", self.policy_external_verification)
+        self.policy_conflict = QComboBox()
+        for label, value in (
+            ("发现冲突时提醒", "warn"),
+            ("发现冲突时强制复核", "require-review"),
+            ("只记录，完全人工处理", "manual"),
+        ):
+            self.policy_conflict.addItem(label, value)
+        conflict_index = self.policy_conflict.findData(
+            policy_values.get("conflict_policy", "warn")
+        )
+        if conflict_index >= 0:
+            self.policy_conflict.setCurrentIndex(conflict_index)
+        policy_form.addRow("冲突处理", self.policy_conflict)
+        self.policy_reliability = QComboBox()
+        for label, value in (
+            ("新资料默认未评估", "unassessed"),
+            ("新资料默认中等可靠", "medium"),
+            ("新资料默认低可靠", "low"),
+        ):
+            self.policy_reliability.addItem(label, value)
+        reliability_index = self.policy_reliability.findData(
+            policy_values.get("default_source_reliability", "unassessed")
+        )
+        if reliability_index >= 0:
+            self.policy_reliability.setCurrentIndex(reliability_index)
+        policy_form.addRow("来源默认值", self.policy_reliability)
+        policy_hint = QLabel(
+            "这里保存的是结构化安全策略，不会读取或执行外部 AGENTS.md。"
+            "更改“知识空间 ID”后保存，会为新空间创建独立策略。"
+        )
+        policy_hint.setWordWrap(True)
+        policy_hint.setObjectName("muted")
+        policy_form.addRow("", policy_hint)
+        tabs.addTab(policy_tab, "知识空间策略")
+
         providers = QWidget()
         provider_form = QFormLayout(providers)
         provider_status = {item["id"]: item for item in controller.providers.status()}
@@ -1344,10 +1418,13 @@ class SettingsDialog(QDialog):
             "large-v3", "medium", "small", "base", "tiny",
         }:
             return f"faster-whisper-{model}"
+        if provider == "faster-whisper":
+            return None
         return {
             "Qwen3-ASR-1.7B": "qwen3-asr-1.7b-mlx",
             "Qwen3-ASR-0.6B": "qwen3-asr-0.6b-mlx",
             "large-v3": "whisper-large-v3-mlx",
+            "large-v3-turbo-q4": "whisper-large-v3-turbo-q4-mlx",
             "medium": "whisper-medium-mlx",
             "small": "whisper-small-mlx",
             "base": "whisper-base-mlx",
@@ -1390,7 +1467,7 @@ class SettingsDialog(QDialog):
         }.get(profile)
         if profile == "compatibility":
             current = str(self.asr_model.currentData() or "")
-            preferred = ("auto", current if current in {"large-v3", "medium", "small", "base", "tiny"} else self.controller.settings.whisper_model)
+            preferred = ("auto", current if current in {"large-v3", "large-v3-turbo-q4", "medium", "small", "base", "tiny"} else self.controller.settings.whisper_model)
         if preferred:
             provider_index = self.asr_provider.findData(preferred[0])
             model_index = self.asr_model.findData(preferred[1])
@@ -1585,6 +1662,22 @@ class SettingsDialog(QDialog):
             update_manifest_url=self.update_url.text().strip() or None,
             obsidian_vault=self.obsidian_path.text().strip() or None,
         )
+        self.controller.save_knowledge_space_policy(
+            policy_id=settings.asr_knowledge_space_id,
+            name=self.policy_name.text().strip() or settings.asr_knowledge_space_id,
+            policy={
+                "auto_propose": self.policy_auto_propose.isChecked(),
+                "require_review": self.policy_require_review.isChecked(),
+                "external_verification": self.policy_external_verification.isChecked(),
+                "conflict_policy": str(self.policy_conflict.currentData() or "warn"),
+                "default_source_reliability": str(
+                    self.policy_reliability.currentData() or "unassessed"
+                ),
+                "routing": "source-to-proposal-to-knowledge",
+                "answer_model": settings.default_model,
+                "transcription_profile": settings.transcription_profile,
+            },
+        )
         self.controller.save_settings(settings)
 
 
@@ -1693,6 +1786,10 @@ class MainWindow(QMainWindow):
         governance = QAction("知识体检中心…", self)
         governance.triggered.connect(self.show_knowledge_health)
         knowledge_menu.addAction(governance)
+        operations = QAction("知识运营中心…", self)
+        operations.setShortcut(QKeySequence("Ctrl+Shift+K"))
+        operations.triggered.connect(self.open_knowledge_operations)
+        knowledge_menu.addAction(operations)
         retrieval_lab = QAction("检索实验室…", self)
         retrieval_lab.triggered.connect(self.open_retrieval_lab)
         knowledge_menu.addAction(retrieval_lab)
@@ -1918,6 +2015,11 @@ class MainWindow(QMainWindow):
         self.knowledge_trash_button.clicked.connect(self.show_knowledge_trash)
         knowledge_actions.addWidget(self.knowledge_trash_button)
         knowledge_layout.addLayout(knowledge_actions)
+        operations_button = QPushButton("知识运营中心 · 候选 / 来源 / 评测 / SOP / Wiki")
+        operations_button.setAccessibleName("打开知识运营中心")
+        operations_button.setToolTip("统一管理候选审核、来源质量、黄金评测、SOP 和便携 Wiki")
+        operations_button.clicked.connect(self.open_knowledge_operations)
+        knowledge_layout.addWidget(operations_button)
         self.left_tabs.addTab(knowledge_tab, "知识")
 
         history_tab = QWidget()
@@ -2857,6 +2959,12 @@ class MainWindow(QMainWindow):
             self._operation_error("知识体检失败", str(exc))
             return
         KnowledgeHealthDialog(report, self).exec()
+
+    def open_knowledge_operations(self) -> None:
+        dialog = KnowledgeOperationsDialog(self.controller, self)
+        dialog.exec()
+        self.refresh_knowledge()
+        self.refresh_library()
 
     def show_knowledge_trash(self) -> None:
         dialog = KnowledgeTrashDialog(self.controller, self)

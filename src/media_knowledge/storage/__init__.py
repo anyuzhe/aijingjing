@@ -14,6 +14,14 @@ from .governance import (
     RelatedKnowledgeItem,
 )
 from .ingestion_jobs import IngestionJobRepository
+from .operations import (
+    DEFAULT_POLICY,
+    KnowledgeOperationsRepository,
+    KnowledgeProposal,
+    KnowledgeSpacePolicy,
+    SourceAssessment,
+    WorkflowTemplate,
+)
 from .vector import SQLiteVectorStore, VectorStore
 
 __all__ = [
@@ -31,6 +39,12 @@ __all__ = [
     "KNOWLEDGE_MATURITIES",
     "KNOWLEDGE_RELATION_TYPES",
     "IngestionJobRepository",
+    "DEFAULT_POLICY",
+    "KnowledgeOperationsRepository",
+    "KnowledgeProposal",
+    "KnowledgeSpacePolicy",
+    "SourceAssessment",
+    "WorkflowTemplate",
     "SQLiteVectorStore",
     "VectorStore",
 ]

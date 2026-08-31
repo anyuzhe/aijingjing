@@ -1,5 +1,33 @@
 # Changelog / 更新日志
 
+## 2.5.0 — 2026-08-31
+
+### 中文
+
+- 新增“知识运营中心”，集中管理知识候选、来源质量与有效期、显式冲突、重复资料、黄金问题集评测、SOP 流程和便携 Wiki。
+- 深度精校知识卡按内容指纹去重并生成待审核候选；接受后建立 `source → supports → knowledge` 证据关系，正式知识仍保持“需要复核”。
+- 新增知识空间结构化策略，覆盖候选生成、人工复核、来源默认可靠性、外部核验许可和冲突处理；策略采用字段允许列表，不执行外部 `AGENTS.md` 或任意脚本。
+- 新增来源评估事实层，保存来源类型、可靠性、解析完整度、发布日期、有效期、复核时间和说明；知识体检合并显示未评估、低可靠、解析不完整和过期资料。
+- 新增便携 `LLM-Wiki` 编译器，从 SQLite 唯一事实源生成带 frontmatter 的类型目录、标签索引、原始/成果状态页、知识关系、变更日志和断链/孤立检查。
+- 新增结构化 SOP 流程库；保存触发条件、步骤、模型边界与隐私边界，但不执行任意代码。
+- 把黄金问题集评测接入桌面界面；默认只运行本地检索指标，引用评测必须显式勾选后才调用当前模型。
+- 新增 Apple Silicon `Whisper Large v3 Turbo Q4` 模型选项；MLX Whisper 与 faster-whisper 均关闭跨段自条件，降低长中文重复循环风险。
+- 深度精校完成后同步导出校验过的 SRT/VTT，并验证段落来源映射、时间顺序、边界和原始时间轴覆盖。
+- 发布脚本可识别 macOS/Qt 在全部测试通过后的解释器退出崩溃；仅在日志存在最终 `OK` 标记时继续打包，真实测试失败仍会阻断发布。
+- 数据库升级到 schema 14，并保持对既有知识库的幂等迁移。
+
+### English
+
+- Added a Knowledge Operations Center for proposal review, source trust/freshness, explicit conflicts, duplicates, golden evaluation, SOPs, and portable Wiki compilation.
+- Promoted deep-correction cards into deduplicated review proposals with source-segment provenance; accepted items retain `needs-review` and receive `supports` edges from their source.
+- Added allowlisted per-space policies for proposal generation, review gates, default source trust, external verification, and conflict handling. External `AGENTS.md` files and arbitrary scripts are never executed.
+- Added audited source assessments integrated into knowledge health checks, a structured non-executable SOP library, and an opt-in desktop golden-set citation evaluation flow.
+- Added a portable `LLM-Wiki` compiler with frontmatter, typed catalogs, tag and raw/output indexes, graph links, operation logs, and link/orphan checks while SQLite remains authoritative.
+- Added the Apple Silicon `Whisper Large v3 Turbo Q4` option and disabled cross-segment decoder conditioning in both Whisper providers to reduce long-Chinese repetition loops.
+- Deep correction now exports validated corrected SRT/VTT alongside Markdown and verifies cue provenance, order, bounds, and source-timeline coverage.
+- The release gate now recognizes the macOS/Qt interpreter-teardown crash only after unittest has emitted its final `OK`; any real test failure still blocks packaging.
+- Upgraded the database to schema 14 with idempotent migration for existing installations.
+
 ## 2.4.0 — 2026-08-30
 
 ### 中文
