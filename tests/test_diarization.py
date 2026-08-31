@@ -351,6 +351,8 @@ class LocalProviderTests(unittest.TestCase):
             def assert_callback(callback) -> None:
                 if callback(1, 2) != 0:
                     raise AssertionError("callback must return zero")
+                if callback(1, 2) != 0:
+                    raise AssertionError("duplicate callback must return zero")
 
         fake_module = SimpleNamespace(
             OfflineSpeakerSegmentationPyannoteModelConfig=PyannoteConfig,
@@ -396,6 +398,7 @@ class LocalProviderTests(unittest.TestCase):
         self.assertEqual(captured["sample_count"], 160)
         self.assertGreaterEqual(checks, 2)
         self.assertIn("Sherpa-ONNX 说话人分段 50%", messages)
+        self.assertEqual(messages.count("Sherpa-ONNX 说话人分段 50%"), 1)
         self.assertEqual(
             segments,
             [(0.0, 0.5, "provider-speaker-1"), (0.5, 1.0, "provider-speaker-0")],

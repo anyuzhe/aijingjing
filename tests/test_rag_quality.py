@@ -32,6 +32,23 @@ class FixedAnswerProvider(AnswerProvider):
         return AnswerResponse(self.markdown, self.model, self.name, TokenUsage())
 
 
+class RepairingCoverageProvider(AnswerProvider):
+    name = "coverage-repair-test"
+    model = "coverage-repair-test"
+
+    def __init__(self) -> None:
+        self.requests: list[AnswerRequest] = []
+
+    def generate(self, request: AnswerRequest) -> AnswerResponse:
+        self.requests.append(request)
+        markdown = (
+            "高自信胜率 17%。[S1]\n中自信胜率 27%。[S1]\n低自信胜率 40%。[S1]"
+            if len(self.requests) > 1
+            else "高自信胜率 17%。\n中自信胜率 27%。\n低自信胜率 40%。[S1]"
+        )
+        return AnswerResponse(markdown, self.model, self.name, TokenUsage())
+
+
 class RAGQualityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -71,6 +88,24 @@ class RAGQualityTests(unittest.TestCase):
         self.assertEqual(
             answer.to_dict()["evidence_quality"]["unsupported_claim_count"], 1
         )
+
+    def test_low_citation_coverage_gets_one_grounded_repair(self) -> None:
+        report = self.indexing.index_document(
+            document_from_text(
+                "高自信胜率 17%，中自信胜率 27%，低自信胜率 40%。",
+                title="胜率复盘",
+                source_id="coverage-repair-source",
+            )
+        )
+        provider = RepairingCoverageProvider()
+        answer = KnowledgeQAEngine(
+            self.database, self._retriever(), answer_provider=provider
+        ).ask("三档胜率分别是多少", document_ids=[report.document_id])
+
+        self.assertEqual(len(provider.requests), 2)
+        self.assertIn("引用覆盖不足", provider.requests[1].system_prompt)
+        self.assertEqual(answer.evidence_quality.level, "well_supported")
+        self.assertEqual(answer.evidence_quality.citation_coverage, 1.0)
 
     def test_small_selected_document_uses_full_context(self) -> None:
         paragraph_a = " ".join(["alpha"] * 340) + "."

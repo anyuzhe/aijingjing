@@ -1,5 +1,31 @@
 # Changelog / 更新日志
 
+## 2.5.1 — 2026-08-31
+
+### 中文
+
+- 本次实测的 16 GB Apple Silicon 安装已切换为约 464 MB 的 `Whisper Large v3 Turbo Q4`，保留可切换高精度路线；真实双录音测试覆盖首轮转写、Sherpa 说话人识别、局部重识别、精校、字幕、归档、检索和连续问答。
+- DeepSeek 深度精校使用 JSON 模式、显式输出预算并关闭该机械任务的默认深度思考，避免只返回推理内容而没有最终 JSON；单分块支持严格校验反馈与三次重试，失败时保守保留原稿。
+- 深度精校证据契约升级为 v2：本地证据使用不可变原文哨兵，局部重识别保留目标片段定位，真实重叠上下文的越界修改被安全丢弃，伪造片段和重复核心修改仍被拒绝。
+- 旧精校检查点在输入、网页候选或契约变化后自动失效并重算；保守兜底不再写成成功检查点，防止后续重试被永久短路。
+- 外部网页核验新增词项相关性门禁，明显无关的票务、铁路、通用数字页面不会注入模型或污染导出；所有网页仍是不可信候选，只有逐字引用通过后才能支持修改。
+- 实体统一拒绝模型生成的 `AI`、`系统`、`模型` 等过宽别名，避免把标准实体错误扩散到无关句子；用户明确维护的专业词库不受影响。
+- 待复核、禁用或没有检索分块的来源现在标为 `needs-review/unreviewed`；只有已启用且真实建有索引的来源才显示 `current/indexed`，便携 Wiki 与数据库状态保持一致。
+- 人工接受精校修改不能绕过原转写质量门禁；问答会对逐条事实引用覆盖不足的草稿执行一次受控修复，并继续明确把该指标定义为引用覆盖率而非事实概率。
+- Sherpa 说话人进度按百分比去重，避免长音频处理时界面和任务审计被重复事件淹没。
+
+### English
+
+- Switched the tested 16 GB Apple Silicon installation to the roughly 464 MB `Whisper Large v3 Turbo Q4` route while retaining selectable accuracy-oriented models. Two real recordings exercised transcription, Sherpa diarization, interval re-recognition, correction, subtitles, archival, retrieval, and multi-turn Q&A end to end.
+- DeepSeek correction now uses JSON mode, an explicit output budget, and disabled thinking for this schema-bound mechanical pass. Each chunk receives strict validation feedback and up to three attempts; exhausted attempts preserve raw evidence conservatively.
+- Upgraded the correction evidence contract to v2 with immutable-source sentinels, required target locators for interval re-recognition, safe disposal of real overlap-only edits, and continued rejection of fabricated locators or duplicate core edits.
+- Stale correction checkpoints are invalidated and recomputed when inputs, web candidates, or contracts change. Conservative fallbacks are no longer persisted as successful checkpoints.
+- Added relevance gating for external verification hits so unrelated ticketing, railway, and generic-number pages never reach the model or exported audit. Web data remains untrusted and can support a change only through exact verified citations.
+- Rejected overly broad model-generated entity aliases such as `AI`, `system`, and `model`, preventing canonical names from leaking into unrelated sentences while preserving explicit user glossaries.
+- Managed source governance now mirrors actual searchability: quarantined, disabled, and chunkless sources are `needs-review/unreviewed`; only enabled sources with real chunks are `current/indexed`, including portable Wiki output.
+- Accepted correction proposals cannot bypass the source transcript quality gate. Q&A performs one controlled repair when per-claim citation coverage is low and continues to label the metric as citation coverage, not truth probability.
+- Deduplicated Sherpa diarization progress by rounded percentage to keep long-running UI and task audits readable.
+
 ## 2.5.0 — 2026-08-31
 
 ### 中文

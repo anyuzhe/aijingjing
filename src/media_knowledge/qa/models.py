@@ -255,6 +255,9 @@ class AnswerRequest:
     response_language: str | None = None
     image_attachments: list[ImageAttachment] = field(default_factory=list)
     delta_callback: Callable[[str], None] | None = None
+    response_format: str | None = None
+    max_output_tokens: int | None = None
+    thinking_mode: str | None = None
 
 
 @dataclass(slots=True)

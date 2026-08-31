@@ -305,16 +305,31 @@ class KnowledgeQAEngine:
             )
         )
         validation = self.citation_validator.validate(response.markdown, evidence)
+        correction_errors = list(validation.errors)
         if validation.valid:
-            return response
+            draft_citations = self.citation_validator.citations(validation, evidence)
+            draft_quality = evaluate_evidence_quality(
+                response.markdown,
+                evidence,
+                draft_citations,
+                retrieval_strategy="draft",
+                image_count=len(images),
+            )
+            if not evidence or draft_quality.citation_coverage >= 0.8:
+                return response
+            correction_errors.append(
+                "引用覆盖不足："
+                f"仅 {draft_quality.cited_claim_count}/{draft_quality.claim_count} 个知识陈述带引用；"
+                "请在每个事实句或每条列表项末尾分别添加对应证据标记"
+            )
 
-        logger.warning("citation validation requested repair errors=%s", validation.errors)
+        logger.warning("citation validation requested repair errors=%s", correction_errors)
 
         repair_system, repair_user = build_answer_prompt(
             question,
             context,
             evidence,
-            correction_errors=validation.errors,
+            correction_errors=correction_errors,
             response_language=response_language,
             image_count=len(images),
         )

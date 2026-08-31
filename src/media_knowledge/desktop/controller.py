@@ -1758,6 +1758,8 @@ class DesktopController:
                 raise ValueError("转写任务不存在或事实层不完整")
             if not record.document_id:
                 raise ValueError("该转写任务尚未关联知识库资料")
+            if record.status != "completed" or str(record.quality.get("status") or "") != "pass":
+                raise ValueError("转写尚未通过人工复核，不能刷新检索索引")
             document_row = database.get_document(record.document_id)
             if document_row is None:
                 raise ValueError("转写任务关联的资料已被移除")

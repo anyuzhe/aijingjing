@@ -272,6 +272,45 @@ class KnowledgeGovernanceTests(unittest.TestCase):
         self.assertTrue(self.repository.delete_item(source.id))
         self.assertIsNotNone(self.database.get_document(report.document_id))
 
+    def test_managed_source_state_tracks_searchability(self) -> None:
+        indexing = IndexingService(
+            self.database, HashEmbeddingProvider(dimensions=32, model="state-test")
+        )
+        document = document_from_text(
+            "只有通过质量门禁后才允许进入检索。",
+            title="状态同步资料",
+            source_id="governance-state-source",
+        )
+
+        deferred = indexing.persist_document_without_search_index(document)
+        source = self.repository.get_item_for_document(deferred.document_id)
+        assert source is not None
+        self.assertEqual((source.status, source.maturity), ("needs-review", "unreviewed"))
+
+        self.assertTrue(self.database.set_document_enabled(deferred.document_id, True))
+        source = self.repository.get_item_for_document(deferred.document_id)
+        assert source is not None
+        self.assertEqual((source.status, source.maturity), ("needs-review", "unreviewed"))
+
+        indexed = indexing.index_document(document)
+        self.assertEqual(indexed.status, "unchanged")
+        # An unchanged metadata hash must not bypass the missing-index state.
+        source = self.repository.get_item_for_document(deferred.document_id)
+        assert source is not None
+        self.assertEqual((source.status, source.maturity), ("needs-review", "unreviewed"))
+
+        document.metadata["human_reviewed"] = True
+        indexed = indexing.index_document(document)
+        self.assertEqual(indexed.status, "updated")
+        source = self.repository.get_item_for_document(deferred.document_id)
+        assert source is not None
+        self.assertEqual((source.status, source.maturity), ("current", "indexed"))
+
+        self.assertTrue(self.database.set_document_enabled(deferred.document_id, False))
+        source = self.repository.get_item_for_document(deferred.document_id)
+        assert source is not None
+        self.assertEqual((source.status, source.maturity), ("needs-review", "indexed"))
+
     def test_version_11_backfills_existing_documents_artifacts_and_support_edges(self) -> None:
         indexing = IndexingService(
             self.database, HashEmbeddingProvider(dimensions=32, model="migration-test")

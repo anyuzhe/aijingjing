@@ -112,6 +112,7 @@ class IndexingService:
                     model=self.embedding_provider.model,
                     content_hash=chunk.content_hash,
                 )
+            self.database.sync_document_knowledge_state(document_id)
 
         return IndexReport(
             document_id=document_id,
@@ -169,6 +170,7 @@ class IndexingService:
                 "UPDATE documents SET enabled=0, updated_at=? WHERE id=?",
                 (document.updated_at, document_id),
             )
+            self.database.sync_document_knowledge_state(document_id)
 
         return IndexReport(
             document_id=document_id,
@@ -182,7 +184,9 @@ class IndexingService:
 
         chunks = self.database.get_chunks(document_id)
         with self.database.connection:
-            return self.database.delete_chunks(row["id"] for row in chunks.values())
+            removed = self.database.delete_chunks(row["id"] for row in chunks.values())
+            self.database.sync_document_knowledge_state(document_id)
+            return removed
 
     def _document_state_matches(self, existing, document: KnowledgeDocument) -> bool:
         """Return true only when content and every persisted locator/facet agree."""

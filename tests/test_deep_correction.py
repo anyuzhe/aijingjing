@@ -6,10 +6,13 @@ import unittest
 from dataclasses import replace
 
 from media_knowledge.transcripts.deep_correction import (
+    CorrectionChunk,
     DeepCorrectionConfig,
+    DeepCorrectionEngine,
     DeepCorrectionService,
     DeepCorrectionValidationError,
     ExternalEvidence,
+    EntityResolution,
     LLMCorrectionRequest,
     ReRecognitionResult,
     detect_correction_issues,
@@ -249,6 +252,54 @@ class StrictStructuredOutputTests(unittest.TestCase):
         self.assertEqual(parsed.corrections[0]["segment_id"], "seg-1")
         self.assertEqual(parsed.chapters[0]["start_segment_id"], "seg-1")
 
+    def test_local_evidence_sentinel_is_replaced_with_immutable_source_text(self) -> None:
+        payload = self.valid_payload()
+        payload["corrections"][0]["evidence"][0]["quote"] = "__FULL_SEGMENT__"  # type: ignore[index]
+        parsed = parse_llm_correction(
+            json.dumps(payload, ensure_ascii=False), self.request, self.lookup
+        )
+        evidence = parsed.corrections[0]["evidence"][0]
+        self.assertEqual(evidence.quote, self.lookup["seg-1"].raw_text)
+
+    def test_real_overlap_target_is_discarded_until_its_core_chunk(self) -> None:
+        chunk = plan_correction_chunks(
+            self.transcript,
+            config=DeepCorrectionConfig(
+                target_chunk_ms=2_500,
+                max_core_segments=2,
+                overlap_segments=1,
+                overlap_ms=0,
+            ),
+        )[0]
+        self.assertEqual(chunk.core_segment_ids, ("seg-1",))
+        self.assertIn("seg-2", chunk.context_segment_ids)
+        request = replace(self.request, chunk=chunk)
+        payload = json.loads(response_for(request, corrections=[
+            {
+                "segment_id": "seg-1",
+                "corrected_text": "我们使用 Obsidian 管理知识。",
+                "reason": "当前核心片段",
+                "confidence": 0.95,
+                "uncertain": False,
+                "evidence": [{"kind": "source", "segment_id": "seg-1", "quote": "奥格森林"}],
+            },
+            {
+                "segment_id": "seg-2",
+                "corrected_text": "重叠区不应由当前分块修改。",
+                "reason": "上下文越界",
+                "confidence": 0.95,
+                "uncertain": False,
+                "evidence": [{"kind": "source", "segment_id": "seg-2", "quote": "96.6%"}],
+            },
+        ]))
+
+        parsed = parse_llm_correction(
+            json.dumps(payload, ensure_ascii=False), request, self.lookup
+        )
+        self.assertEqual(
+            [item["segment_id"] for item in parsed.corrections], ["seg-1"]
+        )
+
     def test_rejects_markdown_unknown_fields_missing_core_and_wrong_chunk(self) -> None:
         cases = []
         valid = self.valid_payload()
@@ -414,12 +465,118 @@ class DeepCorrectionEngineTests(unittest.TestCase):
         self.assertEqual(second_llm.requests, [])
         self.assertEqual(second.completed_chunk_ids, first.completed_chunk_ids)
 
+        stale_key = next(iter(store.values))
+        store.values[stale_key]["request_hash"] = "stale-input"
+        refreshed_llm = AdaptiveLLM()
+        refreshed = DeepCorrectionService(
+            refreshed_llm, checkpoint_store=store, config=self.config()
+        ).run(sample_transcript(), known_terms={"Obsidian": ("奥格森林",)})
+        self.assertTrue(refreshed_llm.requests)
+        self.assertTrue(any("旧检查点输入已变化" in item for item in refreshed.warnings))
+
         first_key = next(iter(store.values))
         store.values[first_key]["response"] = "{}"
         with self.assertRaises(DeepCorrectionValidationError):
             DeepCorrectionService(
                 AdaptiveLLM(), checkpoint_store=store, config=self.config()
             ).run(sample_transcript(), known_terms={"Obsidian": ("奥格森林",)})
+
+    def test_invalid_model_contract_is_retried_without_repeating_rerecognition(self) -> None:
+        class RetryLLM:
+            def __init__(self) -> None:
+                self.requests = []
+                self.failed_once = False
+
+            def correct(self, request):
+                self.requests.append(request)
+                if not self.failed_once:
+                    self.failed_once = True
+                    first = request.chunk.core_segment_ids[0]
+                    return response_for(request, corrections=[{
+                        "segment_id": first,
+                        "corrected_text": "无证据修订",
+                        "reason": "测试严格校验",
+                        "confidence": 0.9,
+                        "uncertain": False,
+                        "evidence": [],
+                    }])
+                return response_for(request)
+
+        llm = RetryLLM()
+        recognizer = FakeReRecognizer()
+        result = DeepCorrectionService(
+            llm, rerecognizer=recognizer, config=self.config()
+        ).run(sample_transcript(), known_terms={"Obsidian": ("奥格森林",)})
+
+        self.assertTrue(result.completed_chunk_ids)
+        self.assertIsNone(llm.requests[0].validation_feedback)
+        self.assertIn("每条修订至少需要一条证据", llm.requests[1].validation_feedback or "")
+        self.assertEqual(len(recognizer.requests), len(result.completed_chunk_ids))
+
+    def test_rerecognition_prompt_requires_target_segment_locator(self) -> None:
+        transcript = sample_transcript()
+        request = LLMCorrectionRequest(
+            job_id="prompt-contract",
+            chunk=CorrectionChunk(
+                id="chunk-prompt",
+                ordinal=0,
+                core_segment_ids=("seg-1",),
+                context_segment_ids=("seg-1",),
+                core_start_ms=0,
+                core_end_ms=10_000,
+                context_start_ms=0,
+                context_end_ms=10_000,
+            ),
+            segments=({
+                "segment_id": "seg-1",
+                "ordinal": 0,
+                "start_ms": 0,
+                "end_ms": 10_000,
+                "speaker_id": "S1",
+                "raw_text": transcript.segments[0].raw_text,
+                "current_corrected_text": None,
+                "confidence": 0.9,
+                "flags": [],
+            },),
+            issues=(),
+            known_terms={},
+            established_entities={},
+            rerecognition=ReRecognitionResult("重识别原文", model="test"),
+        )
+
+        prompt = request.prompt()
+        self.assertIn("仍须提供 segment_id", prompt)
+        self.assertIn("当前 correction 的目标 segment_id", prompt)
+
+    def test_repeated_invalid_contract_preserves_raw_chunk_and_continues(self) -> None:
+        class AlwaysInvalidLLM:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def correct(self, request):
+                self.calls += 1
+                first = request.chunk.core_segment_ids[0]
+                return response_for(request, corrections=[{
+                    "segment_id": first,
+                    "corrected_text": "没有证据的文字",
+                    "reason": "模型契约错误",
+                    "confidence": 0.99,
+                    "uncertain": False,
+                    "evidence": [],
+                }])
+
+        llm = AlwaysInvalidLLM()
+        config = replace(self.config(), model_max_attempts=2)
+        store = MemoryCheckpoint()
+        result = DeepCorrectionService(
+            llm, checkpoint_store=store, config=config
+        ).run(sample_transcript())
+
+        self.assertEqual(llm.calls, len(result.completed_chunk_ids) * 2)
+        self.assertTrue(any("保留该分块原文" in item for item in result.warnings))
+        self.assertTrue(any("最后原因" in item for item in result.warnings))
+        self.assertTrue(all(item.corrected_text is None for item in result.transcript.segments))
+        self.assertEqual(store.saves, 0)
 
     def test_cancellation_is_checked_before_model_work(self) -> None:
         llm = AdaptiveLLM()
@@ -494,6 +651,23 @@ class DeepCorrectionEngineTests(unittest.TestCase):
         self.assertEqual(evidence.title, web.title)
         self.assertEqual(evidence.url, web.url)
         self.assertIsNone(evidence.segment_id)
+
+    def test_generic_model_entity_aliases_are_not_applied_globally(self) -> None:
+        established: dict[str, str] = {}
+        records: list[EntityResolution] = []
+
+        DeepCorrectionEngine._merge_entities(
+            [EntityResolution(
+                "AI炒股系统", ("AI", "系统", "AI的炒股系统"), ("seg-1",)
+            )],
+            established,
+            records,
+        )
+
+        self.assertNotIn("ai", established)
+        self.assertNotIn("系统", established)
+        self.assertEqual(established["ai的炒股系统"], "AI炒股系统")
+        self.assertEqual(records[0].variants, ("AI的炒股系统",))
 
 
 if __name__ == "__main__":

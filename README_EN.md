@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
     <img src="https://img.shields.io/badge/Test-pytest-2F855A" alt="pytest">
-    <img src="https://img.shields.io/badge/Version-2.5.0-4C8FBF" alt="Version 2.5.0">
+    <img src="https://img.shields.io/badge/Version-2.5.1-4C8FBF" alt="Version 2.5.1">
   </p>
 </div>
 
@@ -377,7 +377,7 @@ pip install pytest
 pytest -q
 ```
 
-The 2.5.0 suite covers ASR routing, model lifecycle and content verification, Turbo Q4, long-Chinese decoder protection, audio preparation, crash recovery, Qwen3-ASR/Whisper fallback, scoped glossaries, diarization, Transcript V2, interval re-recognition, strict correction, corrected SRT/VTT integrity, proposal review, knowledge-space policy, source assessment, SOPs, portable Wiki compilation, golden-set evaluation, evidence validation, timeline/audit behavior, deferred indexing, playback, human correction, synthesis, and the existing indexing, governance, OCR, public-media safety, backup, privacy, and desktop coverage.
+The 2.5.1 suite covers ASR routing, model lifecycle and content verification, Turbo Q4, long-Chinese decoder protection, audio preparation, crash recovery, Qwen3-ASR/Whisper fallback, scoped glossaries, diarization, Transcript V2, interval re-recognition, strict correction, corrected SRT/VTT integrity, proposal review, knowledge-space policy, source assessment, SOPs, portable Wiki compilation, golden-set evaluation, evidence validation, timeline/audit behavior, deferred indexing, playback, human correction, synthesis, and the existing indexing, governance, OCR, public-media safety, backup, privacy, and desktop coverage.
 
 The repository also includes a local golden-set evaluation framework for Hit Rate@K, MRR, Citation Precision, and Citation Coverage. Replace the placeholder document and chunk IDs in the example with IDs from your own library, then run `knowledge eval`; add `--retrieval-only` to evaluate retrieval without answer generation.
 

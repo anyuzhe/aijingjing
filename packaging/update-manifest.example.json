@@ -1,6 +1,6 @@
 {
-  "version": "2.5.0",
-  "download_url": "https://downloads.example.com/AI-Jingjing-2.5.0-macOS-arm64-MLX.dmg",
+  "version": "2.5.1",
+  "download_url": "https://downloads.example.com/AI-Jingjing-2.5.1-macOS-arm64-MLX.dmg",
   "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "notes": "AI静静 2.5：知识候选人工审核、空间策略、来源质量/冲突中心、黄金问题集、SOP、便携 LLM Wiki、Whisper Large v3 Turbo Q4，以及经过完整性校验的精校 SRT/VTT。发布前请替换下载地址和 SHA-256。"
+  "notes": "AI静静 2.5.1：16 GB 设备默认使用 Whisper Large v3 Turbo Q4，并增强深度精校证据契约、检查点失效、网页相关性过滤、实体边界、引用覆盖和待复核资料隔离。发布前请替换下载地址和 SHA-256。"
 }

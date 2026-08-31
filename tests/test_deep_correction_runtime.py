@@ -43,14 +43,40 @@ class DeepCorrectionRuntimeTests(unittest.TestCase):
     def test_llm_adapter_accepts_only_one_json_object(self) -> None:
         provider = _Provider("```json\n{\"ok\":true}\n```")
         payload = AnswerProviderCorrectionLLM(provider).correct(_request())
-        self.assertEqual(json.loads(payload), {"ok": True})
+        self.assertEqual(json.loads(payload), {
+            "ok": True,
+            "schema_version": "deep-correction-response-v2",
+        })
         assert provider.request is not None
         self.assertIn("不得把输入转写", provider.request.system_prompt)
+        self.assertEqual(provider.request.response_format, "json_object")
+        self.assertEqual(provider.request.max_output_tokens, 16_384)
+
+    def test_llm_adapter_disables_thinking_only_for_deepseek(self) -> None:
+        deepseek = _Provider('{"ok":true}')
+        deepseek.model = "deepseek-v4-flash"
+        AnswerProviderCorrectionLLM(deepseek).correct(_request())
+        assert deepseek.request is not None
+        self.assertEqual(deepseek.request.thinking_mode, "disabled")
+
+        kimi = _Provider('{"ok":true}')
+        kimi.model = "kimi-k3"
+        AnswerProviderCorrectionLLM(kimi).correct(_request())
+        assert kimi.request is not None
+        self.assertIsNone(kimi.request.thinking_mode)
 
     def test_llm_adapter_does_not_salvage_surrounding_prose(self) -> None:
         provider = _Provider("说明：{\"ok\":true}")
         with self.assertRaisesRegex(RuntimeError, "完整 JSON"):
             AnswerProviderCorrectionLLM(provider).correct(_request())
+
+    def test_llm_adapter_restores_only_constant_schema_version(self) -> None:
+        provider = _Provider('{"chunk_id":"chunk"}')
+        payload = json.loads(AnswerProviderCorrectionLLM(provider).correct(_request()))
+        self.assertEqual(payload, {
+            "chunk_id": "chunk",
+            "schema_version": "deep-correction-response-v2",
+        })
 
     def test_checkpoint_is_atomic_private_and_key_is_hashed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

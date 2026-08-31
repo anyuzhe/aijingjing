@@ -175,12 +175,20 @@ class SherpaOnnxProvider:
                 f"{required_sample_rate} Hz 音频，实际为 {sample_rate} Hz"
             )
 
+        last_reported_percent = -1
+
         def on_progress(processed_chunks: int, num_chunks: int) -> int:
+            nonlocal last_reported_percent
             if check_cancelled:
                 check_cancelled()
             if progress and num_chunks > 0:
                 percent = min(100, max(0, round(processed_chunks * 100 / num_chunks)))
-                progress(f"Sherpa-ONNX 说话人分段 {percent}%")
+                # Sherpa invokes this callback for many internal chunks. Several
+                # consecutive callbacks often round to the same percentage; do
+                # not flood the UI and ingestion-job audit table with duplicates.
+                if percent != last_reported_percent:
+                    progress(f"Sherpa-ONNX 说话人分段 {percent}%")
+                    last_reported_percent = percent
             return 0
 
         # In sherpa-onnx 1.13.x the sample rate is a property of the loaded

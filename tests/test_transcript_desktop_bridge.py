@@ -123,6 +123,10 @@ class TranscriptDesktopBridgeTests(unittest.TestCase):
         self.assertEqual(result["transcript"]["format"], "ai-jingjing-transcript-v2")
 
     def test_correction_rebuilds_speech_index_and_preserves_visual_chunk(self) -> None:
+        with self.assertRaisesRegex(ValueError, "尚未通过人工复核"):
+            self.controller.refresh_transcript_index(self.run_id)
+
+        self.controller.approve_transcript_for_retrieval(self.run_id)
         with KnowledgeDatabase(self.controller.paths.database) as database:
             TranscriptRepository(database).update_corrected_text(
                 "run-desktop-bridge-seg-1",

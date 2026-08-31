@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "media-knowledge"
-version = "2.5.0"
+version = "2.5.1"
 description = "AI知识库-AI静静：本地优先的多模态知识摄取与可溯源问答桌面应用"
 requires-python = ">=3.11"
 dependencies = []

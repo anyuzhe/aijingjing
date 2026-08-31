@@ -31,6 +31,28 @@ class _Search(WebSearchProvider):
         return [WebSearchHit("Obsidian 官方帮助", "Obsidian 是一款知识管理工具。", "https://example.test/obsidian")]
 
 
+class _DriftingSearch(WebSearchProvider):
+    name = "drifting-fake"
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def search(self, query: str, top_k: int = 5) -> list[WebSearchHit]:
+        return [
+            WebSearchHit(
+                "铁路购票新规定",
+                "遇到无票和延迟出票时请查看订单状态。",
+                "https://example.test/tickets",
+            ),
+            WebSearchHit(
+                "Obsidian 与 RAG 实践",
+                "Obsidian 知识库可配合 RAG 检索。",
+                "https://example.test/knowledge",
+            ),
+        ]
+
+
 def _transcript() -> TranscriptV2:
     return TranscriptV2(
         TranscriptSource("课程.wav", "a" * 64, 2000),
@@ -65,6 +87,16 @@ class ExternalEvidenceCollectionTests(unittest.TestCase):
         result = collect_external_evidence(_transcript(), _Search(fail=True), max_queries=1)
         self.assertEqual(result.evidence, ())
         self.assertTrue(result.warnings)
+
+    def test_obvious_search_drift_is_filtered_before_model_injection(self) -> None:
+        result = collect_external_evidence(
+            _transcript(), _DriftingSearch(), max_queries=2, results_per_query=2
+        )
+        self.assertEqual(
+            {item.url for item in result.evidence},
+            {"https://example.test/knowledge"},
+        )
+        self.assertTrue(any("已过滤" in warning for warning in result.warnings))
 
 
 if __name__ == "__main__":

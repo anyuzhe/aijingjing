@@ -159,6 +159,43 @@ class AnswerModelTests(unittest.TestCase):
             self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
             self.assertEqual(result.markdown, "图片中是一个流程图。")
 
+    def test_openai_compatible_provider_sends_structured_output_budget(self) -> None:
+        provider = OpenAICompatibleAnswerProvider(
+            "https://provider.example/v1", "test-key", "deepseek-v4-flash"
+        )
+        response = {
+            "choices": [{"message": {"content": '{"ok":true}'}, "finish_reason": "stop"}],
+            "usage": {},
+        }
+        with mock.patch.object(provider, "request_json", return_value=response) as request:
+            provider.generate(AnswerRequest(
+                question="structured",
+                system_prompt="system",
+                user_prompt="user",
+                evidence=[],
+                response_format="json_object",
+                max_output_tokens=16_384,
+                thinking_mode="disabled",
+            ))
+        payload = request.call_args.args[0]
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_tokens"], 16_384)
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+
+    def test_openai_compatible_provider_explains_reasoning_only_response(self) -> None:
+        provider = OpenAICompatibleAnswerProvider(
+            "https://provider.example/v1", "test-key", "deepseek-v4-flash"
+        )
+        response = {
+            "choices": [{
+                "message": {"content": "", "reasoning_content": "still thinking"},
+                "finish_reason": "length",
+            }],
+        }
+        with mock.patch.object(provider, "request_json", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "exhausted its output budget"):
+                provider.generate(AnswerRequest("q", "system", "user", []))
+
     def test_openai_compatible_provider_streams_visible_deltas(self) -> None:
         provider = OpenAICompatibleAnswerProvider(
             "https://provider.example/v1", "test-key", "deepseek-v4-flash"

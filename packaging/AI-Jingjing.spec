@@ -100,8 +100,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleDisplayName": "AI知识库-AI静静",
             "CFBundleName": "AI静静",
-            "CFBundleShortVersionString": "2.5.0",
-            "CFBundleVersion": "2.5.0",
+            "CFBundleShortVersionString": "2.5.1",
+            "CFBundleVersion": "2.5.1",
             "NSHighResolutionCapable": True,
         },
     )

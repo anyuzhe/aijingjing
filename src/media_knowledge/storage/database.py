@@ -269,6 +269,11 @@ class KnowledgeDatabase:
                 (BASE_SCHEMA_VERSION, utcnow_iso()),
             )
             self._apply_incremental_migrations()
+            # Managed source items mirror the *searchable* document state.  This
+            # idempotent reconciliation also repairs databases created by older
+            # releases, which labelled every source as current/indexed even when
+            # a transcript had been quarantined for human review.
+            self._sync_all_managed_document_knowledge_states()
             missing_references = self.connection.execute(
                 """SELECT c.id, c.document_id, c.source_reference_json
                    FROM chunks c LEFT JOIN source_references sr ON sr.chunk_id=c.id
@@ -457,7 +462,14 @@ class KnowledgeDatabase:
                    id, item_type, status, maturity, title, summary, body,
                    document_id, artifact_id, high_value, metadata_json, created_at, updated_at
                )
-               SELECT 'kg:document:' || id, 'source', 'current', 'indexed', title, '', '',
+               SELECT 'kg:document:' || id, 'source',
+                      CASE WHEN enabled=1 AND EXISTS(
+                          SELECT 1 FROM chunks WHERE chunks.document_id=documents.id
+                      ) THEN 'current' ELSE 'needs-review' END,
+                      CASE WHEN EXISTS(
+                          SELECT 1 FROM chunks WHERE chunks.document_id=documents.id
+                      ) THEN 'indexed' ELSE 'unreviewed' END,
+                      title, '', '',
                       id, NULL, 0, '{"managed_from":"documents"}', created_at, updated_at
                FROM documents"""
         )
@@ -975,7 +987,7 @@ class KnowledgeDatabase:
             """INSERT OR IGNORE INTO knowledge_items(
                    id, item_type, status, maturity, title, summary, body,
                    document_id, artifact_id, high_value, metadata_json, created_at, updated_at
-               ) VALUES (?, 'source', 'current', 'indexed', ?, '', '', ?, NULL, 0,
+               ) VALUES (?, 'source', 'needs-review', 'unreviewed', ?, '', '', ?, NULL, 0,
                          '{"managed_from":"documents"}', ?, ?)""",
             (
                 f"kg:document:{document.document_id}",
@@ -1011,6 +1023,64 @@ class KnowledgeDatabase:
             ),
         )
 
+    def sync_document_knowledge_state(self, document_id: str) -> bool:
+        """Synchronize one managed source item's status with its real index state."""
+
+        row = self.connection.execute(
+            """SELECT d.enabled,
+                      EXISTS(SELECT 1 FROM chunks c WHERE c.document_id=d.id) AS has_chunks
+               FROM documents d WHERE d.id=?""",
+            (document_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        has_chunks = bool(row["has_chunks"])
+        status = "current" if bool(row["enabled"]) and has_chunks else "needs-review"
+        maturity = "indexed" if has_chunks else "unreviewed"
+        self.connection.execute(
+            """UPDATE knowledge_items
+               SET status=?, maturity=?, updated_at=?
+               WHERE document_id=? AND item_type='source'
+                 AND (status<>? OR maturity<>?)""",
+            (status, maturity, utcnow_iso(), document_id, status, maturity),
+        )
+        return True
+
+    def _sync_all_managed_document_knowledge_states(self) -> None:
+        """Repair managed source state without changing hand-authored knowledge items."""
+
+        now = utcnow_iso()
+        self.connection.execute(
+            """UPDATE knowledge_items
+               SET status=CASE WHEN EXISTS(
+                       SELECT 1 FROM documents d
+                       WHERE d.id=knowledge_items.document_id AND d.enabled=1
+                   ) AND EXISTS(
+                       SELECT 1 FROM chunks c
+                       WHERE c.document_id=knowledge_items.document_id
+                   ) THEN 'current' ELSE 'needs-review' END,
+                   maturity=CASE WHEN EXISTS(
+                       SELECT 1 FROM chunks c
+                       WHERE c.document_id=knowledge_items.document_id
+                   ) THEN 'indexed' ELSE 'unreviewed' END,
+                   updated_at=?
+               WHERE item_type='source'
+                 AND metadata_json='{"managed_from":"documents"}'
+                 AND (
+                     status<>CASE WHEN EXISTS(
+                         SELECT 1 FROM documents d
+                         WHERE d.id=knowledge_items.document_id AND d.enabled=1
+                     ) AND EXISTS(
+                         SELECT 1 FROM chunks c
+                         WHERE c.document_id=knowledge_items.document_id
+                     ) THEN 'current' ELSE 'needs-review' END
+                     OR maturity<>CASE WHEN EXISTS(
+                         SELECT 1 FROM chunks c
+                         WHERE c.document_id=knowledge_items.document_id
+                     ) THEN 'indexed' ELSE 'unreviewed' END
+                 )""",
+            (now,),
+        )
     def replace_facets(self, document_id: str, collections: Sequence[str], tags: Sequence[str]) -> None:
         self.connection.execute("DELETE FROM document_collections WHERE document_id = ?", (document_id,))
         self.connection.execute("DELETE FROM document_tags WHERE document_id = ?", (document_id,))
@@ -1387,6 +1457,8 @@ class KnowledgeDatabase:
                 "UPDATE documents SET enabled=?, updated_at=? WHERE id=?",
                 (1 if enabled else 0, utcnow_iso(), document_id),
             )
+            if cursor.rowcount > 0:
+                self.sync_document_knowledge_state(document_id)
         return cursor.rowcount > 0
 
     def save_annotation(

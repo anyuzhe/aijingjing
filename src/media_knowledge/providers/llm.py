@@ -188,6 +188,12 @@ class OpenAICompatibleAnswerProvider(AnswerProvider):
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if request.response_format == "json_object":
+            payload["response_format"] = {"type": "json_object"}
+        if request.max_output_tokens is not None:
+            payload["max_tokens"] = max(1, int(request.max_output_tokens))
+        if request.thinking_mode in {"enabled", "disabled"}:
+            payload["thinking"] = {"type": request.thinking_mode}
         if request.delta_callback:
             payload["stream"] = True
             return self._stream_answer(payload, request.delta_callback)
@@ -381,7 +387,19 @@ class OpenAICompatibleAnswerProvider(AnswerProvider):
         message = choices[0].get("message") if isinstance(choices[0], dict) else None
         markdown = message.get("content") if isinstance(message, dict) else None
         if not isinstance(markdown, str) or not markdown.strip():
-            raise RuntimeError("answer provider returned empty content")
+            finish_reason = str(choices[0].get("finish_reason") or "").strip()
+            reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+            reasoning_length = len(reasoning) if isinstance(reasoning, str) else 0
+            if finish_reason in {"length", "max_tokens"} or reasoning_length:
+                raise RuntimeError(
+                    "answer provider exhausted its output budget before producing final content"
+                    f" (finish_reason={finish_reason or 'unknown'}, "
+                    f"reasoning_chars={reasoning_length})"
+                )
+            raise RuntimeError(
+                "answer provider returned empty content"
+                + (f" (finish_reason={finish_reason})" if finish_reason else "")
+            )
         raw_usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
         usage = TokenUsage(
             input_tokens=int(raw_usage.get("prompt_tokens", 0)),

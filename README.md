@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/UI-PySide6-41CD52" alt="PySide6">
     <img src="https://img.shields.io/badge/Storage-SQLite%20FTS5-0F80CC" alt="SQLite FTS5">
     <img src="https://img.shields.io/badge/Test-pytest-2F855A" alt="pytest">
-    <img src="https://img.shields.io/badge/Version-2.5.0-4C8FBF" alt="Version 2.5.0">
+    <img src="https://img.shields.io/badge/Version-2.5.1-4C8FBF" alt="Version 2.5.1">
   </p>
 </div>
 
@@ -377,7 +377,7 @@ pip install pytest
 pytest -q
 ```
 
-2.5.0 的自动化测试覆盖 ASR Provider 路由、本地模型生命周期与内容校验、Turbo Q4、长中文解码保护、音频预检/标准化/VAD、持久检查点与崩溃恢复、Qwen3-ASR/Whisper 降级、三层专业词库、说话人识别、Transcript V2、异常检测、连续重叠分块、局部重识别、严格结构化精校、精校 SRT/VTT 完整性、候选审核、知识空间策略、来源评估、SOP、便携 Wiki、黄金集评测、外部证据校验、时间轴保真、逐条校订审计、延迟索引质量门禁、播放器、人工校订、证据分层知识提炼与索引桥接，以及分块、原子索引、数据库迁移、知识治理、OCR、公开视频安全、内容寻址归档、隐私分享、备份恢复和桌面产品行为。
+2.5.1 的自动化测试覆盖 ASR Provider 路由、本地模型生命周期与内容校验、Turbo Q4、长中文解码保护、音频预检/标准化/VAD、持久检查点与崩溃恢复、Qwen3-ASR/Whisper 降级、三层专业词库、说话人识别、Transcript V2、异常检测、连续重叠分块、局部重识别、严格结构化精校、精校 SRT/VTT 完整性、候选审核、知识空间策略、来源评估、SOP、便携 Wiki、黄金集评测、外部证据校验、时间轴保真、逐条校订审计、延迟索引质量门禁、播放器、人工校订、证据分层知识提炼与索引桥接，以及分块、原子索引、数据库迁移、知识治理、OCR、公开视频安全、内容寻址归档、隐私分享、备份恢复和桌面产品行为。
 
 仓库还提供本地黄金集评测框架，可计算 Hit Rate@K、MRR、Citation Precision 和 Citation Coverage。先把示例中的文档 ID、知识块 ID 换成自己的入库记录，再运行 `knowledge eval`；加 `--retrieval-only` 可只评估检索。
 

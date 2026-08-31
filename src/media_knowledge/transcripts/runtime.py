@@ -36,6 +36,24 @@ class AnswerProviderCorrectionLLM:
             user_prompt=request.prompt(),
             evidence=[],
             response_language=self.response_language,
+            response_format="json_object",
+            # Reasoning-capable compatible models count their private reasoning
+            # and the final JSON against the same completion budget.  The
+            # default provider limit can be consumed before ``content`` starts
+            # on a multi-minute transcript, leaving an otherwise successful
+            # response with only ``reasoning_content``.
+            max_output_tokens=16_384,
+            # DeepSeek V4 enables high-effort thinking by default.  For this
+            # exhaustive but mechanical schema-constrained pass it can consume
+            # the entire output budget before emitting the JSON.  Disable it
+            # only for DeepSeek correction calls; regular QA keeps the user's
+            # normal model behavior and other compatible providers receive no
+            # vendor-specific option.
+            thinking_mode=(
+                "disabled"
+                if str(getattr(self.provider, "model", "")).casefold().startswith("deepseek")
+                else None
+            ),
         ))
         payload = str(response.markdown or "").strip()
         fenced = _FENCED_JSON_RE.fullmatch(payload)
@@ -50,6 +68,12 @@ class AnswerProviderCorrectionLLM:
             raise RuntimeError("精校模型没有返回完整 JSON，可从检查点安全重试") from exc
         if not isinstance(parsed, dict):
             raise RuntimeError("精校模型返回的顶层结构不是 JSON 对象")
+        # Some JSON-mode models omit a constant schema discriminator even
+        # though every substantive field is present.  This value is fixed by
+        # the caller and carries no source fact, so it is safe to restore here.
+        # Do not repair any content, segment, evidence, or locator field; the
+        # core parser remains strict for all of those.
+        parsed.setdefault("schema_version", request.schema_version)
         return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
 
 

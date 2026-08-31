@@ -88,8 +88,8 @@ class _FakeWebProvider(WebSearchProvider):
 
     def search(self, query: str, top_k: int = 5) -> list[WebSearchHit]:
         return [WebSearchHit(
-            "Obsidian 官方帮助",
-            "Obsidian 是一款用于管理链接笔记的知识工具。",
+            "Obsidian 与 RAG 官方帮助",
+            "Obsidian 是一款用于管理链接笔记并配合 RAG 检索的知识工具。",
             "https://example.com/obsidian",
         )]
 
